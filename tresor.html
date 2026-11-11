@@ -68,10 +68,12 @@ if (typeof window.showDirectoryPicker !== 'function') { $('#nochrome').hidden = 
 $('#saved').addEventListener('change', (e) => { $('#pick').disabled = !e.target.checked; });
 $('#pick').addEventListener('click', async () => {
   try { parent = await window.showDirectoryPicker({ id: 'bbx-tresor', mode: 'readwrite' }); }
-  catch (e) { if (e.name !== 'AbortError') alert('Ordner konnte nicht geöffnet werden: ' + e.message); return; }
+  catch (e) { showMsg(e.name === 'AbortError' ? 'Die Ordnerwahl wurde abgebrochen (oder das Bearbeiten nicht erlaubt). Bitte noch einmal.' : 'Ordner konnte nicht geöffnet werden: ' + e.message); console.log('picker', e.name, e.message); return; }
+  console.log('gewählt:', parent.name);
   root = await child(parent, VAULT, 'directory');
   if (!root || !(await child(root, 'Übungen', 'directory'))) {
-    alert('Bitte den Ordner „Exercises“ wählen – den, in dem „' + VAULT + '“ liegt.');
+    showMsg('Gewählt wurde „' + parent.name + '“. Bitte den Ordner „Exercises“ wählen – den, in dem „' + VAULT + '“ liegt.');
+    parent = null; root = null;
     return;
   }
   $('#report').hidden = false;
@@ -80,6 +82,7 @@ $('#pick').addEventListener('click', async () => {
   showReport();
 });
 
+function showMsg(t) { const r = $('#report'); r.hidden = false; r.innerHTML = `<div class="callout warn">${esc(t)}</div>`; }
 async function child(dir, name, kind) { for await (const [n, h] of dir.entries()) if (h.kind === kind && n.normalize('NFC') === name.normalize('NFC')) return h; return null; }
 async function* walk(dir, path = '') {
   for await (const [name, h] of dir.entries()) {
