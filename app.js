@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -608,8 +608,13 @@ function wakeOff() { try { if (wakeLock) wakeLock.release(); } catch (e) { /* eg
 // P = laufendes Workout
 let P = null;
 const ANN_LABEL = { sig: 'Signaltöne', voice: 'Sprachansage', both: 'Töne + Sprache', none: 'Keine Ansagen' };
-function startDialog(id) {
-  const w = S.workouts.find((x) => x.id === id); if (!w) return;
+// trial = Probelauf am PC mit dem gerade bearbeiteten (auch ungespeicherten) Workout
+let pendingPlay = null;
+function startDialog(id, trial = false) {
+  const w = trial ? ui.ed : S.workouts.find((x) => x.id === id); if (!w) return;
+  if (!exCount(w)) { toast('Das Workout enthält noch keine Übungen.', { error: true }); return; }
+  pendingPlay = { w, trial };
+  const speed = +(localStorage.getItem('bb_trial_speed') || 1);
   const last = localStorage.getItem('bb_ann') || 'both';
   const missing = [];
   for (const b of w.blocks) for (const it of b.items) {
@@ -617,25 +622,30 @@ function startDialog(id) {
     for (const k of ['sound', 'restSound']) if (it[k] && (!S.sounds[it[k]] || !mediaKeysHere.has(S.sounds[it[k]].media))) missing.push('Ein Musikstück fehlt auf diesem Gerät');
   }
   const dur = workoutDuration(w);
-  openModal(`${modalHead(esc(w.name || 'Workout'))}
+  openModal(`${modalHead((trial ? 'Probelauf: ' : '') + esc(w.name || 'Workout'))}
+    ${trial ? '<p class="small muted" style="margin-bottom:6px">Spielt das Workout so ab wie später im Keller – mit dem Stand im Editor, auch wenn noch nicht gespeichert. Danach bist du wieder im Editor.</p>' : ''}
     <p class="muted">${exCount(w)} Übungen · ${w.mode === 'time' ? 'auf Zeit, ca. ' + durText(dur) : 'per Tippen'}</p>
     ${missing.length ? `<div class="callout warn">${[...new Set(missing)].map(esc).join('<br>')}. Bitte unter „Daten“ holen.</div>` : ''}
     <div class="label" style="margin-top:14px">Ansagen</div>
     <div class="seg" id="annSeg">${Object.entries(ANN_LABEL).map(([k, v]) => `<button data-a="ann" data-k="${k}" class="${k === last ? 'on' : ''}">${v}</button>`).join('')}</div>
-    <div class="modal-foot"><button class="btn ghost" data-a="modal-close">Abbrechen</button><button class="btn" data-a="play-go" data-id="${w.id}">${ic('play')}Los geht's</button></div>`);
+    ${trial && w.mode === 'time' ? `<div class="label" style="margin-top:14px">Tempo</div>
+    <div class="seg" id="spdSeg">${[[1, 'Echtzeit'], [5, '5× schneller'], [10, '10× schneller']].map(([k, v]) => `<button data-a="spd" data-k="${k}" class="${k === speed ? 'on' : ''}">${v}</button>`).join('')}</div>
+    <p class="hint">Bei schnellerem Tempo gibt es keine Sprachansage, Töne und Musik laufen mit.</p>` : ''}
+    <div class="modal-foot"><button class="btn ghost" data-a="modal-close">Abbrechen</button><button class="btn" data-a="play-go">${ic('play')}${trial ? 'Probelauf starten' : "Los geht's"}</button></div>`);
 }
-function playStart(w) {
+function playStart(w, trial = false) {
   const steps = buildSteps(w);
+  const speed = trial && w.mode === 'time' ? +(localStorage.getItem('bb_trial_speed') || 1) : 1;
   if (!steps.length) { toast('Das Workout enthält noch keine Übungen.', { error: true }); return; }
   const ann = localStorage.getItem('bb_ann') || 'both';
   closeModal();
   aeInit(); pickVoice();
-  P = { w, steps, i: 0, t0: performance.now(), acc: 0, paused: false, sig: ann === 'sig' || ann === 'both', voice: ann === 'voice' || ann === 'both', lastBeep: null, startedAt: Date.now(), timer: null, fading: false };
+  P = { w, steps, i: 0, t0: performance.now(), acc: 0, paused: false, sig: ann === 'sig' || ann === 'both', voice: (ann === 'voice' || ann === 'both') && speed === 1, lastBeep: null, startedAt: Date.now(), timer: null, fading: false, trial, speed };
   wakeOn();
   enterStep(0);
   P.timer = setInterval(tick, 100);
 }
-function stepElapsed() { return P.paused ? P.acc : P.acc + (performance.now() - P.t0) / 1000; }
+function stepElapsed() { return P.paused ? P.acc : P.acc + (performance.now() - P.t0) / 1000 * (P.speed || 1); }
 function enterStep(i) {
   P.i = i; P.acc = 0; P.t0 = performance.now(); P.lastBeep = null; P.fading = false;
   const s = P.steps[i];
@@ -698,7 +708,7 @@ function finish() {
   renderPlayer();
 }
 function playClose() {
-  if (P && !P.done && !confirm('Workout beenden?')) return;
+  if (P && !P.done && !P.trial && !confirm('Workout beenden?')) return;
   if (P) clearInterval(P.timer);
   musicStop(0.3);
   if (window.speechSynthesis) speechSynthesis.cancel();
@@ -714,7 +724,7 @@ function renderPlayer() {
   if (!P) { root.innerHTML = ''; return; }
   if (P.done) {
     root.innerHTML = `<div class="player ph-done"><div class="pl-done"><h2>Geschafft!</h2>
-      <p class="muted" style="font-size:1.2rem">${esc(P.w.name || 'Workout')} · ${durText((P.endedAt - P.startedAt) / 1000)}</p>
+      <p class="muted" style="font-size:1.2rem">${esc(P.w.name || 'Workout')} · ${P.trial ? 'Probelauf' + (P.speed > 1 ? ' (' + P.speed + '× schneller)' : '') + ', geplante Dauer ' + durText(workoutDuration(P.w) || 0) : durText((P.endedAt - P.startedAt) / 1000)}</p>
       <button class="btn" data-a="play-close" style="min-height:60px;font-size:1.2rem;padding:0 30px">Schließen</button></div></div>`;
     return;
   }
@@ -722,7 +732,7 @@ function renderPlayer() {
   const phase = s.kind === 'work' ? 'ph-work' : s.kind === 'rest' ? 'ph-rest' : 'ph-prep';
   const label = s.kind === 'work' ? 'ÜBUNG' : s.kind === 'rest' ? 'PAUSE' : 'GLEICH GEHT’S LOS';
   const ref = s.kind === 'work' ? s : s.next;
-  const info = ref ? `${ref.block.title ? esc(ref.block.title) + ' · ' : ''}${ref.rounds > 1 ? `Runde ${ref.round}/${ref.rounds} · ` : ''}Übung ${ref.no}/${ref.total}` : '';
+  const info = (P.trial ? `PROBELAUF${P.speed > 1 ? ' ×' + P.speed : ''} · ` : '') + (ref ? `${ref.block.title ? esc(ref.block.title) + ' · ' : ''}${ref.rounds > 1 ? `Runde ${ref.round}/${ref.rounds} · ` : ''}Übung ${ref.no}/${ref.total}` : '');
   let main;
   if (s.kind === 'work') {
     const timed = !!s.dur;
@@ -1134,7 +1144,7 @@ function viewEditor() {
   h += `<button class="btn ghost" data-a="bl-add">${ic('plus')}Abschnitt hinzufügen</button>`;
   const d = workoutDuration(w);
   h += `<div class="ed-foot"><span class="muted small" style="margin-right:auto;align-self:center">${exCount(w)} Übungen${d ? ' · ca. ' + durText(d) : ''}</span>
-    <button class="btn ghost" data-a="ed-cancel">Abbrechen</button><button class="btn" data-a="ed-save">${ic('check')}Speichern</button></div></div>`;
+    <button class="btn blue" data-a="ed-trial">${ic('play')}Probelauf</button><button class="btn ghost" data-a="ed-cancel">Abbrechen</button><button class="btn" data-a="ed-save">${ic('check')}Speichern</button></div></div>`;
   return h;
 }
 function edRefresh(focusId) {
@@ -1192,7 +1202,9 @@ const ACTIONS = {
   },
   'wo-start': (el) => startDialog(el.dataset.id),
   ann: (el) => { localStorage.setItem('bb_ann', el.dataset.k); $$('#annSeg button').forEach((b) => b.classList.toggle('on', b === el)); },
-  'play-go': (el) => { const w = S.workouts.find((x) => x.id === el.dataset.id); if (w) playStart(w); },
+  'play-go': () => { if (pendingPlay) playStart(pendingPlay.w, pendingPlay.trial); pendingPlay = null; },
+  spd: (el) => { localStorage.setItem('bb_trial_speed', el.dataset.k); $$('#spdSeg button').forEach((b) => b.classList.toggle('on', b === el)); },
+  'ed-trial': () => startDialog(null, true),
   'play-next': () => playNext(),
   'play-prev': () => playPrev(),
   'play-pause': () => playPause(),
