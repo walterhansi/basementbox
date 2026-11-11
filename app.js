@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -44,7 +44,7 @@ function num(v) { const n = parseFloat(String(v ?? '').replace(',', '.')); retur
 function pad(n) { return String(n).padStart(2, '0'); }
 function mmss(sec) { sec = Math.max(0, Math.ceil(sec)); return Math.floor(sec / 60) + ':' + pad(sec % 60); }
 function durText(sec) { sec = Math.round(sec); const m = Math.floor(sec / 60), s = sec % 60; return m ? `${m} min${s ? ' ' + s + ' s' : ''}` : `${s} s`; }
-function fmtDate(ts) { return new Date(ts).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' }) + ', ' + new Date(ts).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) + ' Uhr'; }
+function fmtDate(ts) { return new Date(ts).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' }) + ', ' + new Date(ts).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) + ' Uhr'; }
 function norm(s) { return String(s || '').normalize('NFC').toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss').replace(/[^a-z0-9]/g, ''); }
 const nfc = (s) => String(s).normalize('NFC');
 function isPC() { return !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent); }
@@ -670,6 +670,16 @@ let sync = null;
 try { sync = JSON.parse(localStorage.getItem(SYNC_KEY) || 'null'); } catch (e) { sync = null; }
 function saveSync() { try { if (sync) localStorage.setItem(SYNC_KEY, JSON.stringify(sync)); else localStorage.removeItem(SYNC_KEY); } catch (e) { /* egal */ } }
 function syncReady() { return !!(sync && sync.repo && sync.token); }
+// Gerätename wie in fitlog; beim ersten Mal wird der Name aus fitlog übernommen (nur gelesen).
+function deviceName() {
+  let d = localStorage.getItem('bb_device');
+  if (d == null) {
+    try { d = (JSON.parse(localStorage.getItem('aofl_data') || 'null') || {}).device || ''; } catch (e) { d = ''; }
+    if (d) localStorage.setItem('bb_device', d);
+  }
+  return d || '';
+}
+function tsText(ts) { return ts ? fmtDate(ts) : 'noch nie'; }
 class SyncError extends Error {}
 function syncErrText(e) { return e instanceof SyncError ? e.message : 'Fehler beim Abgleich: ' + ((e && e.message) || e); }
 async function gh(path, o = {}) {
@@ -732,6 +742,7 @@ function setBusy(t) { ui.busy = t; if (ui.tab === 'data') render(); }
 
 async function syncSend(force = false) {
   if (!syncReady() || ui.busy) return;
+  if (!deviceName()) { toast('Bitte zuerst unter „Dieses Gerät“ einen Gerätenamen eintragen.', { error: true }); ui.tab = 'data'; render(); return; }
   closeModal();
   setBusy('Senden …');
   try {
@@ -758,13 +769,13 @@ async function syncSend(force = false) {
     for (const p of Object.keys(st.files)) if (p.startsWith(MEDIA_DIR) && !ref.has(p.slice(MEDIA_DIR.length))) entries.push({ path: p, mode: '100644', type: 'blob', sha: null });
     // 3. Daten
     setBusy('Daten senden …');
-    const out = Object.assign({}, S, { dirty: undefined, sentAt: Date.now(), sentFrom: navigator.userAgent.slice(0, 80) });
+    const out = Object.assign({}, S, { dirty: undefined, sentAt: Date.now(), device: deviceName() });
     const dataSha = await ghBlob(st.R, new Blob([JSON.stringify(out)], { type: 'application/json' }));
     entries.push({ path: DATA_PATH, mode: '100644', type: 'blob', sha: dataSha });
     for (let attempt = 0; ; attempt++) {
       try {
         const tree = await gh(`/repos/${st.R}/git/trees`, { method: 'POST', body: { base_tree: st.treeSha, tree: entries.filter((e) => e.sha !== null || st.files[e.path]) } });
-        const c = await gh(`/repos/${st.R}/git/commits`, { method: 'POST', body: { message: `Basement Box: Daten gesendet (${fmtDate(Date.now())})`, tree: tree.sha, parents: [st.head] } });
+        const c = await gh(`/repos/${st.R}/git/commits`, { method: 'POST', body: { message: `Basement Box – ${deviceName()}: Daten gesendet (${fmtDate(Date.now())})`, tree: tree.sha, parents: [st.head] } });
         await gh(`/repos/${st.R}/git/refs/heads/${encodeURIComponent(st.br)}`, { method: 'PATCH', body: { sha: c.sha }, conflict: true });
         break;
       } catch (e) {
@@ -809,12 +820,13 @@ async function syncFetch(force = false) {
       const b = await gh(`/repos/${st.R}/git/blobs/${fsha}`);
       await idbPut('media', k, b64ToBlob(b.content, mediaType(k)));
     }
+    const from = d.device ? ` von ${d.device}` : '', when = d.sentAt ? ` (gesendet ${fmtDate(d.sentAt)})` : '';
     S = nd; S.dirty = false;
     await save(false);
     await mediaCleanup();
     sync.dataSha = sha; sync.lastFetch = Date.now(); saveSync();
     ui.news = false;
-    toast(`Geholt: ${S.workouts.length} Workouts, ${Object.keys(S.exercises).length} Übungen, ${Object.keys(S.sounds).length} MP3s.${missing ? ` ${missing} Datei(en) fehlten.` : ''}`, { timeout: 6000 });
+    toast(`Geholt${from}${when}: ${S.workouts.length} Workouts, ${Object.keys(S.exercises).length} Übungen, ${Object.keys(S.sounds).length} MP3s.${missing ? ` ${missing} Datei(en) fehlten.` : ''}`, { timeout: 6000 });
   } catch (e) { toast(syncErrText(e), { error: true, timeout: 9000 }); }
   finally { setBusy(null); render(); }
 }
@@ -926,19 +938,25 @@ function viewMusic() {
 }
 function viewData() {
   const pc = isPC();
-  let h = '<div class="view-inner"><div class="page-head"><h1>Daten</h1></div>';
-  h += '<div class="card"><h3>Abgleich über GitHub</h3>';
+  const busy = ui.busy;
+  let h = `<div class="view-inner narrow"><div class="page-head"><h1>Daten</h1></div>
+    <div class="card"><h3>Dieses Gerät</h3><div class="field" style="margin-top:10px;margin-bottom:0"><label for="dev">Gerätename (erscheint beim Abgleich)</label>
+      <input type="text" id="dev" value="${esc(deviceName())}" placeholder="z. B. Handy, Chromebook oder PC" data-c="device"></div></div>`;
   if (!syncReady()) {
-    h += `<p class="small muted" style="margin:6px 0 12px">Noch nicht eingerichtet. ${pc ? 'Am PC stellst du Workouts zusammen und sendest sie.' : 'Hier holst du die Workouts vom PC.'}</p><button class="btn" data-a="sync-setup">Einrichten</button>`;
+    h += `<div class="card"><h3>Abgleich über GitHub <span class="badge std">Standardweg</span></h3>
+      <p class="small muted" style="margin-top:6px">So kommen deine Workouts vom PC aufs Handy und aufs Chromebook: <b>Senden</b> am PC, <b>Holen</b> auf dem anderen Gerät – mit Übungsbildern und MP3s. Die Ablage ist dein privates Repository (wie bei fitlog) im eigenen Ordner <b>basementbox/</b>.</p>
+      <div class="card-actions"><button class="btn" data-a="sync-setup">${ic('sync')}Einrichten</button></div></div>`;
   } else {
-    h += `<p class="small muted" style="margin:6px 0 12px">Repository <b>${esc(sync.repo)}</b>, Ordner basementbox/<br>
-      ${sync.lastSend ? 'Zuletzt gesendet: ' + fmtDate(sync.lastSend) + '<br>' : ''}${sync.lastFetch ? 'Zuletzt geholt: ' + fmtDate(sync.lastFetch) : ''}</p>
-      ${ui.news ? '<div class="callout warn">Auf GitHub liegt ein neuerer Stand. Bitte „Holen“.</div>' : ''}
-      ${S.dirty && pc ? '<div class="callout">Hier gibt es ungesendete Änderungen.</div>' : ''}
-      ${ui.busy ? `<p class="muted"><b>${esc(ui.busy)}</b></p>` : `<div class="btn-row">${pc ? `<button class="btn" data-a="sync-send">${ic('upload')}Senden</button>` : ''}<button class="btn ${pc ? 'ghost' : ''}" data-a="sync-fetch">${ic('download')}Holen</button><button class="btn ghost" data-a="sync-setup">Einstellungen</button></div>`}`;
+    h += `<div class="card"><h3>Abgleich über GitHub <span class="badge std">Standardweg</span></h3>
+      <p class="small muted" style="margin-top:6px">Ablage: <b>${esc(sync.repo)}</b>, Ordner basementbox/<br>Zuletzt gesendet: <b>${tsText(sync.lastSend)}</b><br>Zuletzt geholt: <b>${tsText(sync.lastFetch)}</b></p>
+      ${ui.news && !busy ? '<div class="callout">Auf GitHub liegt ein neuerer Stand. Bitte „Holen“.</div>' : ''}
+      ${S.dirty && pc && !busy ? '<div class="callout warn">Hier gibt es Änderungen, die noch nicht gesendet wurden.</div>' : ''}
+      <div class="btn-row eq" style="margin-top:12px">${pc ? `<button class="btn" data-a="sync-send" ${busy ? 'disabled' : ''}>${ic('upload')}${busy && busy !== 'Holen …' && !busy.startsWith('Dateien holen') ? esc(busy) : 'Senden'}</button>` : ''}
+        <button class="btn ${pc ? 'ghost' : ''}" data-a="sync-fetch" ${busy ? 'disabled' : ''}>${ic('download')}${busy && (busy === 'Holen …' || busy.startsWith('Dateien holen')) ? esc(busy) : 'Holen'}</button></div>
+      <p class="hint">${pc ? '<b>Senden</b> legt Workouts, Übungsbilder und MP3s dieses PCs auf GitHub ab – nach jeder Änderung. ' : ''}<b>Holen</b> übernimmt, was am PC gesendet wurde. Danach läuft alles auch ohne Internet.</p>
+      <div class="card-actions"><button class="btn sm ghost" data-a="sync-setup" ${busy ? 'disabled' : ''}>Einstellungen</button></div></div>`;
   }
-  h += '</div>';
-  h += `<div class="card"><h3>Auf diesem Gerät</h3><p class="small muted" style="margin-top:6px">${S.workouts.length} Workouts · ${Object.keys(S.exercises).length} Übungen · ${Object.keys(S.sounds).length} MP3s</p><p class="small muted" id="quota"></p></div>`;
+  h += `<div class="card"><h3>Speicher</h3><p class="small muted" style="margin-top:6px">${S.workouts.length} Workouts · ${Object.keys(S.exercises).length} Übungen · ${Object.keys(S.sounds).length} MP3s</p><p class="small muted" id="quota"></p></div>`;
   h += `<div class="card"><h3>Hilfe</h3><p class="small muted" style="margin-top:6px">Basement Box Version ${APP_VERSION}. Es wird nichts protokolliert – das Festhalten deiner Ergebnisse bleibt bei fitlog.</p></div></div>`;
   setTimeout(showQuota, 0);
   return h;
@@ -1114,6 +1132,7 @@ const CHANGES = {
   'it-snd': (el) => { itAt(el)[el.dataset.f] = el.value; },
   'bl-snd': (el) => { if (!el.value) return; for (const it of ui.ed.blocks[+el.dataset.b].items) if (it.t === 'ex') it[el.dataset.f] = el.value; edRefresh(); },
   'obs-dir': (el) => { const files = [...(el.files || [])]; el.value = ''; if (files.length) obsRun(obsTreeFromFiles(files)); },
+  device: (el) => { localStorage.setItem('bb_device', el.value.trim()); },
   'snd-files': (el) => { const files = [...(el.files || [])]; el.value = ''; if (files.length) addSounds(files); }
 };
 const INPUTS = {

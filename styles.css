@@ -99,6 +99,11 @@ h3 { font-size: 1.05rem; font-weight: 700; }
 .btn.block { width: 100%; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn-row.eq > .btn { flex: 1; }
+.card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.view-inner.narrow { max-width: 760px; }
+.badge.std { background: rgba(0, 181, 166, 0.16); color: var(--z1); }
+.card h3 .badge { vertical-align: middle; margin-left: 6px; }
 .icon-btn { width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; color: var(--muted); }
 .icon-btn:hover { background: var(--surface-2); color: var(--text); }
 .icon-btn:disabled { opacity: 0.3; }
