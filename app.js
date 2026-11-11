@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -684,7 +684,7 @@ function playStart(w, trial = false) {
 }
 function stepElapsed() { return P.paused ? P.acc : P.acc + (performance.now() - P.t0) / 1000 * (P.speed || 1); }
 function enterStep(i) {
-  P.i = i; P.acc = 0; P.t0 = performance.now(); P.lastBeep = null; P.fading = false;
+  P.i = i; P.acc = 0; P.t0 = performance.now(); P.lastBeep = null; P.fading = false; P.waiting = false;
   const s = P.steps[i];
   if (!s) { finish(); return; }
   if (!P.paused) musicPlay(s.sound);
@@ -715,8 +715,13 @@ function tick() {
     if (sec <= 3 && sec >= 1 && P.lastBeep !== sec) { P.lastBeep = sec; beep(880, 0.1); }
     // Musik am Ende ausblenden – nur wenn danach ein anderes Stück kommt
     const nx = P.steps[P.i + 1];
-    if (!P.fading && left <= 1.2 && (!nx || (nx.sound || '') !== (s.sound || ''))) { P.fading = true; aeRamp(0, Math.max(0.1, left)); }
-    if (left <= 0) { enterStep(P.i + 1); return; }
+    const holdAfter = s.kind !== 'work' && P.w.restAdvance === 'tap';
+    if (P.waiting) return;
+    if (!holdAfter && !P.fading && left <= 1.2 && (!nx || (nx.sound || '') !== (s.sound || ''))) { P.fading = true; aeRamp(0, Math.max(0.1, left)); }
+    if (left <= 0) {
+      if (holdAfter) { P.waiting = true; beep(660, 0.25); setTimeout(() => beep(880, 0.35), 280); say('Bereit? Tippe aufs Display.'); renderPlayer(); return; }
+      enterStep(P.i + 1); return;
+    }
   }
   updatePlayerClock();
 }
@@ -801,7 +806,7 @@ function renderPlayer() {
         ${n && n.ex.img ? `<div class="pr-img">${imgBox(n.ex, true)}</div>` : ''}
       </div>`;
   }
-  const tap = s.kind === 'work' && !s.dur;
+  const tap = (s.kind === 'work' && !s.dur) || P.waiting;
   root.innerHTML = `<div class="player ${phase}">
     <div class="pl-top"><span class="pl-phase">${label}</span><span class="grow">${info}</span>
       <button class="icon-btn" data-a="play-music" title="Musik an/aus" aria-label="Musik an/aus">${ic(AE.music ? 'speaker' : 'mute')}</button>
@@ -812,7 +817,7 @@ function renderPlayer() {
     <div class="pl-ctrl">
       <button data-a="play-prev" aria-label="Zurück">${ic('prev', 'ic-lg')}</button>
       <button data-a="play-pause" class="${P.paused ? 'on' : ''}" aria-label="${P.paused ? 'Weiter' : 'Pause'}">${ic(P.paused ? 'play' : 'pause', 'ic-lg')}</button>
-      ${tap ? `<button class="pl-go" data-a="play-next">Weiter ${ic('next', 'ic-lg')}</button>` : `<button class="pl-go ph-hide" tabindex="-1"></button><button data-a="play-next" aria-label="Überspringen">${ic('next', 'ic-lg')}</button>`}
+      ${tap ? `<button class="pl-go ${P.waiting ? 'pl-wait' : ''}" data-a="play-next">${P.waiting ? 'Los – tippen' : 'Weiter'} ${ic('next', 'ic-lg')}</button>` : `<button class="pl-go ph-hide" tabindex="-1"></button><button data-a="play-next" aria-label="Überspringen">${ic('next', 'ic-lg')}</button>`}
     </div></div>`;
   hydrate(root).then(fitImages);
   fitImages();
@@ -835,7 +840,7 @@ function updatePlayerClock() {
   if (!P || P.done) return;
   const s = P.steps[P.i], el = stepElapsed();
   const c = $('#plClock'), bar = $('#plBar');
-  if (c) c.textContent = s.dur ? mmss(s.dur - el) : mmss(el);
+  if (c) c.textContent = P.waiting ? 'Bereit?' : s.dur ? mmss(s.dur - el) : mmss(el);
   if (bar) bar.style.width = s.dur ? Math.min(100, el / s.dur * 100) + '%' : '100%';
 }
 
@@ -1170,7 +1175,8 @@ function viewEditor() {
       ${timed ? `<div class="field"><label for="edWork">Übung (Sekunden)</label><input type="number" min="1" id="edWork" value="${w.work}" data-c="ed-num" data-f="work"></div>
       <div class="field"><label for="edRest">Pause (Sekunden)</label><input type="number" min="0" id="edRest" value="${w.rest}" data-c="ed-num" data-f="rest"></div>` : '<div></div><div></div>'}
     </div>
-    <p class="hint">${timed ? 'Die Zeiten gelten für alle Übungen. Bei einzelnen Übungen kannst du sie unten abweichend eintragen. Vor dem Start läuft ein Countdown von ' + (w.prep || 10) + ' Sekunden.' : 'Nach jeder Übung tippst du auf „Weiter“. Unter „Vorgabe“ kannst du z. B. „12 Wdh“ eintragen – das steht dann groß auf dem Bildschirm.'}</p>`;
+    ${timed ? `<div class="field"><label>Nach der Pause</label><div class="seg"><button class="${w.restAdvance === 'tap' ? '' : 'on'}" data-a="ed-adv" data-m="auto">Automatisch weiter</button><button class="${w.restAdvance === 'tap' ? 'on' : ''}" data-a="ed-adv" data-m="tap">Weiter per Tippen aufs Display</button></div></div>` : ''}
+    <p class="hint">${timed ? 'Die Zeiten gelten für alle Übungen. Bei einzelnen Übungen kannst du sie unten abweichend eintragen. Vor dem Start läuft ein Countdown von ' + (w.prep || 10) + ' Sekunden.' + (w.restAdvance === 'tap' ? ' Nach jeder Pause (und nach dem Countdown) wartet die App, bis du aufs Display tippst.' : '') : 'Nach jeder Übung tippst du auf „Weiter“. Unter „Vorgabe“ kannst du z. B. „12 Wdh“ eintragen – das steht dann groß auf dem Bildschirm.'}</p>`;
   w.blocks.forEach((b, bi) => {
     h += `<div class="block"><div class="block-head">
       <input type="text" class="bname" value="${esc(b.title)}" placeholder="Abschnitt ${bi + 1} (Titel optional)" data-in="bl-title" data-b="${bi}">
@@ -1278,6 +1284,7 @@ const ACTIONS = {
   'play-full': () => { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else document.documentElement.requestFullscreen().catch(() => {}); },
   // Editor
   'ed-mode': (el) => { ui.ed.mode = el.dataset.m; edRefresh(); },
+  'ed-adv': (el) => { ui.ed.restAdvance = el.dataset.m; edRefresh(); },
   'ed-cancel': () => { if (!confirm('Änderungen verwerfen?')) return; ui.ed = null; render(); },
   'ed-save': async () => {
     const w = ui.ed;
@@ -1353,6 +1360,8 @@ const INPUTS = {
 
 /* ================= 10 Start ================= */
 document.addEventListener('click', (ev) => {
+  // Wartet das Workout nach der Pause: Tippen irgendwo aufs Display startet die nächste Übung
+  if (P && P.waiting && !P.paused && ev.target.closest('.player') && !ev.target.closest('.pl-top button, .pl-ctrl button')) { playNext(); return; }
   const el = ev.target.closest('[data-a]');
   if (!el || el.disabled || !el.dataset.a) return;
   const fn = ACTIONS[el.dataset.a];
@@ -1366,7 +1375,7 @@ document.addEventListener('keydown', (ev) => {
   if (P && !P.done) {
     // Chromebook-Tastatur: Leertaste/Enter = Weiter (bei „per Tippen“) bzw. Pause; Pfeile = vor/zurück
     const s = P.steps[P.i];
-    if (ev.key === ' ' || ev.key === 'Enter') { ev.preventDefault(); if (s.kind === 'work' && !s.dur) playNext(); else playPause(); return; }
+    if (ev.key === ' ' || ev.key === 'Enter') { ev.preventDefault(); if ((s.kind === 'work' && !s.dur) || P.waiting) playNext(); else playPause(); return; }
     if (ev.key === 'ArrowRight') { playNext(); return; }
     if (ev.key === 'ArrowLeft') { playPrev(); return; }
   }

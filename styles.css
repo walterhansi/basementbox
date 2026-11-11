@@ -308,3 +308,7 @@ textarea { resize: vertical; }
   .pr-cue { font-size: clamp(1.15rem, 2vw, 1.6rem); }
   .pr-head .pl-timer { font-size: clamp(3rem, 8vw, 6.5rem); }
 }
+
+/* Warten nach der Pause bis zum Tippen */
+.pl-ctrl .pl-go.pl-wait { background: var(--z3); color: #fff; animation: plPulse 1.2s ease-in-out infinite; }
+@keyframes plPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.03); } }
