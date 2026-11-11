@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -101,6 +101,7 @@ async function save(changed = true) {
 }
 // Bilder und MP3s: Schlüssel „img_<ID>_<prüfsumme>.jpg“ bzw. „snd_<prüfsumme>.mp3“
 const mediaUrls = new Map();
+let mediaKeysHere = new Set(); // welche Dateien auf diesem Gerät liegen
 async function mediaUrl(key) {
   if (!key) return null;
   if (mediaUrls.has(key)) return mediaUrls.get(key);
@@ -110,15 +111,24 @@ async function mediaUrl(key) {
   mediaUrls.set(key, u);
   return u;
 }
-function referencedMedia() {
+// Welche Dateien dieses Gerät braucht. Am PC die ganze Musik-Sammlung, auf Handy/Chromebook nur Stücke aus Workouts.
+function usedSoundIds(data = S) {
+  const ids = new Set();
+  for (const w of data.workouts || []) for (const b of w.blocks) for (const it of b.items) { if (it.sound) ids.add(it.sound); if (it.restSound) ids.add(it.restSound); }
+  return ids;
+}
+function referencedMedia(data = S, all = isPC()) {
   const keys = new Set();
-  for (const ex of Object.values(S.exercises)) if (ex.img) keys.add(ex.img);
-  for (const sd of Object.values(S.sounds)) if (sd.media) keys.add(sd.media);
+  for (const ex of Object.values(data.exercises || {})) if (ex.img) keys.add(ex.img);
+  const used = usedSoundIds(data);
+  for (const sd of Object.values(data.sounds || {})) if (sd.media && (all || used.has(sd.id))) keys.add(sd.media);
   return keys;
 }
 async function mediaCleanup() {
   const ref = referencedMedia();
-  for (const k of await idbKeys('media')) if (!ref.has(k)) { await idbDel('media', k); if (mediaUrls.has(k)) { URL.revokeObjectURL(mediaUrls.get(k)); mediaUrls.delete(k); } }
+  const keys = await idbKeys('media');
+  mediaKeysHere = new Set(keys.filter((k) => ref.has(k)));
+  for (const k of keys) if (!ref.has(k)) { await idbDel('media', k); if (mediaUrls.has(k)) { URL.revokeObjectURL(mediaUrls.get(k)); mediaUrls.delete(k); } }
 }
 // Nach dem Rendern: Bilder mit data-media nachladen
 async function hydrate(root = document) {
@@ -353,25 +363,119 @@ async function obsApply() {
 function exUsedIn(id) { return S.workouts.filter((w) => w.blocks.some((b) => b.items.some((it) => it.t === 'ex' && it.exId === id))); }
 
 /* ================= 4 Musik ================= */
+// Musik sparsam speichern: Mono, Opus 48 kbit/s, höchstens 3 Minuten (ein Stück wiederholt sich ohnehin, wenn es zu kurz ist).
+const SND_MAX_SEC = 180, SND_RATE = 48000, SND_BITRATE = 48000, OPUS_PRESKIP = 312;
+function canShrink() { return typeof window.AudioEncoder === 'function' && typeof window.OfflineAudioContext === 'function'; }
+async function decodeMono(blob) {
+  const buf = await blob.arrayBuffer();
+  const tmp = new OfflineAudioContext(1, SND_RATE, SND_RATE);
+  const decoded = await tmp.decodeAudioData(buf);
+  const len = Math.min(decoded.duration, SND_MAX_SEC);
+  const n = Math.max(1, Math.round(len * SND_RATE));
+  const ctx = new OfflineAudioContext(1, n, SND_RATE);
+  const src = ctx.createBufferSource(); src.buffer = decoded;
+  // Am Ende des Ausschnitts kurz ausblenden, damit die Schleife nicht knackt
+  const g = ctx.createGain(); const fade = Math.min(1.5, len / 4);
+  g.gain.setValueAtTime(1, Math.max(0, len - fade)); g.gain.linearRampToValueAtTime(0, len);
+  src.connect(g).connect(ctx.destination); src.start(0);
+  const out = await ctx.startRendering();
+  return { pcm: out.getChannelData(0), dur: len };
+}
+async function encodeOpus(pcm) {
+  const packets = [];
+  let err = null;
+  const enc = new AudioEncoder({ output: (chunk) => { const d = new Uint8Array(chunk.byteLength); chunk.copyTo(d); packets.push(d); }, error: (e) => { err = e; } });
+  enc.configure({ codec: 'opus', sampleRate: SND_RATE, numberOfChannels: 1, bitrate: SND_BITRATE });
+  const FR = 960; // 20 ms
+  for (let i = 0; i < pcm.length; i += FR) {
+    const frame = new Float32Array(FR); frame.set(pcm.subarray(i, i + FR));
+    enc.encode(new AudioData({ format: 'f32-planar', sampleRate: SND_RATE, numberOfFrames: FR, numberOfChannels: 1, timestamp: Math.round(i / SND_RATE * 1e6), data: frame }));
+  }
+  await enc.flush(); enc.close();
+  if (err) throw err;
+  return oggOpus(packets, pcm.length);
+}
+// Ogg-Hülle für Opus (RFC 7845)
+const OGG_CRC = (() => { const t = new Uint32Array(256); for (let i = 0; i < 256; i++) { let r = i << 24; for (let j = 0; j < 8; j++) r = r & 0x80000000 ? (r << 1) ^ 0x04c11db7 : r << 1; t[i] = r >>> 0; } return t; })();
+function oggOpus(packets, samples) {
+  const serial = (Math.random() * 0xffffffff) >>> 0;
+  const pages = []; let seq = 0;
+  const page = (segs, granule, flags) => {
+    const lacing = [], body = [];
+    for (const p of segs) { let n = p.length; while (n >= 255) { lacing.push(255); n -= 255; } lacing.push(n); body.push(p); }
+    const blen = body.reduce((a, b) => a + b.length, 0);
+    const out = new Uint8Array(27 + lacing.length + blen); const dv = new DataView(out.buffer);
+    out.set([0x4f, 0x67, 0x67, 0x53], 0); out[4] = 0; out[5] = flags;
+    dv.setUint32(6, Number(BigInt.asUintN(64, BigInt(granule)) & 0xffffffffn), true); dv.setUint32(10, Number(BigInt.asUintN(64, BigInt(granule)) >> 32n), true);
+    dv.setUint32(14, serial, true); dv.setUint32(18, seq++, true); out[26] = lacing.length; out.set(lacing, 27);
+    let o = 27 + lacing.length; for (const b of body) { out.set(b, o); o += b.length; }
+    let crc = 0; for (let i = 0; i < out.length; i++) crc = ((crc << 8) ^ OGG_CRC[((crc >>> 24) ^ out[i]) & 0xff]) >>> 0;
+    dv.setUint32(22, crc, true); pages.push(out);
+  };
+  const head = new Uint8Array(19); const hv = new DataView(head.buffer);
+  head.set([...'OpusHead'].map((c) => c.charCodeAt(0)), 0); head[8] = 1; head[9] = 1; hv.setUint16(10, OPUS_PRESKIP, true); hv.setUint32(12, SND_RATE, true);
+  page([head], 0, 2);
+  const vendor = new TextEncoder().encode('Basement Box'); const tags = new Uint8Array(8 + 4 + vendor.length + 4); const tv = new DataView(tags.buffer);
+  tags.set([...'OpusTags'].map((c) => c.charCodeAt(0)), 0); tv.setUint32(8, vendor.length, true); tags.set(vendor, 12); tv.setUint32(12 + vendor.length, 0, true);
+  page([tags], 0, 0);
+  let cur = [], segs = 0, size = 0, gran = OPUS_PRESKIP;
+  const total = OPUS_PRESKIP + samples;
+  packets.forEach((p, i) => {
+    const need = Math.floor(p.length / 255) + 1;
+    if (cur.length && (segs + need > 255 || size + p.length > 4000)) { page(cur, Math.min(gran, total), 0); cur = []; segs = 0; size = 0; }
+    cur.push(p); segs += need; size += p.length; gran += 960;
+    if (i === packets.length - 1) page(cur, total, 4);
+  });
+  return new Blob(pages, { type: 'audio/ogg' });
+}
+async function shrinkSound(blob) {
+  const { pcm, dur } = await decodeMono(blob);
+  return { blob: await encodeOpus(pcm), dur: Math.round(dur) };
+}
 async function addSounds(files) {
-  let n = 0;
-  openModal(`${modalHead('MP3s laden')}<p class="muted" id="sndBusy">Lade …</p>`);
+  let n = 0, saved = 0, failed = [];
+  const shrink = canShrink();
+  openModal(`${modalHead('Musik laden')}<p class="muted" id="sndBusy">Lade …</p>`);
   for (const f of files) {
-    if (!/^audio\//.test(f.type) && !/\.(mp3|m4a|aac|ogg|wav)$/i.test(f.name)) continue;
-    const b = $('#sndBusy'); if (b) b.textContent = `Lade ${f.name} …`;
+    if (!/^audio\//.test(f.type) && !/\.(mp3|m4a|aac|ogg|opus|wav|flac)$/i.test(f.name)) continue;
+    const b = $('#sndBusy'); if (b) b.textContent = `${shrink ? 'Verkleinere' : 'Lade'} ${f.name} …`;
     const hash = (await sha256hex(f)).slice(0, 20);
-    const ext = (f.name.match(/\.([a-z0-9]+)$/i) || [, 'mp3'])[1].toLowerCase();
-    const key = `snd_${hash}.${ext}`;
-    if (Object.values(S.sounds).some((s) => s.media === key)) continue;
-    const dur = await audioDuration(f);
-    await idbPut('media', key, new Blob([f], { type: f.type || 'audio/mpeg' }));
+    // Gleiche Originaldatei nur einmal – egal ob verkleinert oder nicht
+    if (Object.values(S.sounds).some((s) => s.src === hash || (s.media || '').startsWith(`snd_${hash}.`))) continue;
+    let blob = f, dur = 0, key;
+    if (shrink) {
+      try { const r = await shrinkSound(f); blob = r.blob; dur = r.dur; key = `snd_${hash}.ogg`; } catch (e) { failed.push(f.name); blob = f; }
+    }
+    if (!key) { const ext = (f.name.match(/\.([a-z0-9]+)$/i) || [, 'mp3'])[1].toLowerCase(); key = `snd_${hash}.${ext}`; dur = await audioDuration(f); blob = new Blob([f], { type: f.type || 'audio/mpeg' }); }
+    await idbPut('media', key, blob); mediaKeysHere.add(key);
     const id = uid();
-    S.sounds[id] = { id, name: f.name.replace(/\.[a-z0-9]+$/i, ''), media: key, size: f.size, dur, type: f.type || 'audio/mpeg' };
-    n++;
+    S.sounds[id] = { id, name: f.name.replace(/\.[a-z0-9]+$/i, ''), media: key, src: hash, size: blob.size, origSize: f.size, dur, type: blob.type || 'audio/mpeg' };
+    saved += f.size - blob.size; n++;
   }
   await save();
   closeModal(); render();
-  toast(n ? `${n} MP3(s) geladen.` : 'Keine neuen Musikdateien.');
+  toast(n ? `${n} Stück(e) geladen${saved > 1048576 ? `, ${(saved / 1048576).toFixed(1)} MB gespart` : ''}.${failed.length ? ` Nicht verkleinert: ${failed.join(', ')}` : ''}` : 'Keine neuen Musikdateien.', { timeout: 6000 });
+}
+// Früher geladene, unverkleinerte Stücke nachträglich verkleinern
+async function shrinkExisting() {
+  const list = Object.values(S.sounds).filter((s) => !/\.ogg$/.test(s.media || ''));
+  let saved = 0, i = 0;
+  openModal(`${modalHead('Musik verkleinern')}<p class="muted" id="sndBusy">…</p>`);
+  for (const s of list) {
+    const b = $('#sndBusy'); if (b) b.textContent = `Verkleinere ${++i}/${list.length}: ${s.name} …`;
+    const orig = await idbGet('media', s.media); if (!orig) continue;
+    try {
+      const r = await shrinkSound(orig);
+      const hash = s.src || (s.media.match(/^snd_([0-9a-f]+)\./) || [])[1] || (await sha256hex(orig)).slice(0, 20);
+      const key = `snd_${hash}.ogg`;
+      await idbPut('media', key, r.blob);
+      saved += orig.size - r.blob.size;
+      Object.assign(s, { media: key, src: hash, size: r.blob.size, origSize: s.origSize || orig.size, dur: r.dur, type: 'audio/ogg' });
+    } catch (e) { /* bleibt wie es ist */ }
+  }
+  await save(); await mediaCleanup();
+  closeModal(); render();
+  toast(`${i} Stück(e) verkleinert, ${(saved / 1048576).toFixed(1)} MB gespart. Danach unter „Daten“ senden.`, { timeout: 7000 });
 }
 function audioDuration(blob) {
   return new Promise((res) => {
@@ -510,7 +614,7 @@ function startDialog(id) {
   const missing = [];
   for (const b of w.blocks) for (const it of b.items) {
     if (it.t === 'ex' && !S.exercises[it.exId]) missing.push(`Übung ${it.exId} fehlt`);
-    for (const k of ['sound', 'restSound']) if (it[k] && !S.sounds[it[k]]) missing.push('Ein MP3 fehlt');
+    for (const k of ['sound', 'restSound']) if (it[k] && (!S.sounds[it[k]] || !mediaKeysHere.has(S.sounds[it[k]].media))) missing.push('Ein Musikstück fehlt auf diesem Gerät');
   }
   const dur = workoutDuration(w);
   openModal(`${modalHead(esc(w.name || 'Workout'))}
@@ -756,7 +860,7 @@ async function syncSend(force = false) {
       return;
     }
     // 1. Fehlende Medien hochladen (Bilder, MP3s)
-    const ref = referencedMedia();
+    const ref = referencedMedia(S, true);
     const entries = [];
     const todo = [...ref].filter((k) => !st.files[MEDIA_DIR + k]);
     let i = 0;
@@ -808,9 +912,7 @@ async function syncFetch(force = false) {
     const d = JSON.parse(new TextDecoder().decode(await b64ToBlob(raw.content, 'application/json').arrayBuffer()));
     if (!d || d.app !== 'basementbox') throw new SyncError('Die Daten auf GitHub sind nicht lesbar.');
     const nd = Object.assign(freshData(), d);
-    const need = new Set();
-    for (const ex of Object.values(nd.exercises)) if (ex.img) need.add(ex.img);
-    for (const s of Object.values(nd.sounds)) if (s.media) need.add(s.media);
+    const need = referencedMedia(nd);
     const have = new Set(await idbKeys('media'));
     const todo = [...need].filter((k) => !have.has(k));
     let i = 0, missing = 0;
@@ -825,6 +927,7 @@ async function syncFetch(force = false) {
     S = nd; S.dirty = false;
     await save(false);
     await mediaCleanup();
+    mediaKeysHere = new Set(await idbKeys('media'));
     sync.dataSha = sha; sync.lastFetch = Date.now(); saveSync();
     ui.news = false;
     toast(`Geholt${from}${when}: ${S.workouts.length} Workouts, ${Object.keys(S.exercises).length} Übungen, ${Object.keys(S.sounds).length} MP3s.${missing ? ` ${missing} Datei(en) fehlten.` : ''}`, { timeout: 6000 });
@@ -928,16 +1031,26 @@ function exListHtml(list) {
   }).join('') + '</div>';
 }
 function viewMusic() {
-  const list = Object.values(S.sounds).sort((a, b) => a.name.localeCompare(b.name, 'de'));
-  let h = `<div class="view-inner"><div class="page-head"><h1>Musik</h1>${isPC() ? `<label class="btn">${ic('plus')}MP3s hinzufügen<input type="file" accept="audio/*,.mp3,.m4a" multiple hidden data-c="snd-files"></label>` : ''}</div>
-    <p class="hint" style="margin:-6px 0 12px">Deine eigenen Musikdateien. Im Workout ordnest du jeder Übung und jeder Pause ein Stück zu. Ist es kürzer als die Phase, wiederholt es sich; ist es länger, wird es am Ende ausgeblendet.</p>`;
-  if (!list.length) h += `<div class="empty">Noch keine Musik.${isPC() ? ' „MP3s hinzufügen“ tippen.' : ' Am PC hinzufügen, dann hier „Holen“.'}</div>`;
-  h += '<div class="grid cols">' + list.map((s) => {
-    const used = soundUsedIn(s.id).length;
-    const playing = previewAudio && previewAudio.dataset.id === s.id;
-    return `<div class="card tight"><div class="card-row"><button class="icon-btn" data-a="snd-play" data-id="${s.id}" aria-label="Anhören">${ic(playing ? 'pause' : 'play')}</button>
-      <div class="grow"><div class="card-title">${esc(s.name)}</div><div class="card-sub">${s.dur ? mmss(s.dur) + ' · ' : ''}${(s.size / 1048576).toFixed(1)} MB${used ? ` · in ${used} Workout${used > 1 ? 's' : ''}` : ''}</div></div>
-      ${isPC() ? `<button class="icon-btn" data-a="snd-ren" data-id="${s.id}" title="Umbenennen" aria-label="Umbenennen">${ic('edit')}</button>${used ? '' : `<button class="icon-btn" data-a="snd-del" data-id="${s.id}" title="Löschen" aria-label="Löschen">${ic('trash')}</button>`}` : ''}</div></div>`;
+  const pc = isPC();
+  const used = usedSoundIds();
+  const list = Object.values(S.sounds).filter((x) => pc || used.has(x.id)).sort((a, b) => a.name.localeCompare(b.name, 'de'));
+  const big = Object.values(S.sounds).filter((x) => !/\.ogg$/.test(x.media || ''));
+  const total = list.reduce((a, x) => a + (mediaKeysHere.has(x.media) ? x.size || 0 : 0), 0);
+  let h = `<div class="view-inner"><div class="page-head"><h1>Musik</h1>${pc ? `<label class="btn">${ic('plus')}Musik hinzufügen<input type="file" accept="audio/*,.mp3,.m4a,.ogg,.wav,.flac" multiple hidden data-c="snd-files"></label>` : ''}</div>
+    <p class="hint" style="margin:-6px 0 12px">${pc
+      ? 'Deine eigenen Musikdateien. Beim Hinzufügen werden sie platzsparend gespeichert: Mono, höchstens 3 Minuten. Deine Originaldateien bleiben unverändert. Im Workout ordnest du jeder Übung und jeder Pause ein Stück zu; ist es kürzer als die Phase, wiederholt es sich.'
+      : 'Auf diesem Gerät liegen nur die Stücke, die in deinen Workouts vorkommen.'} Belegt: ${(total / 1048576).toFixed(1)} MB.</p>`;
+  if (pc && big.length && canShrink()) h += `<div class="callout warn">${big.length} Stück(e) sind noch in voller Größe gespeichert. <button class="btn sm" data-a="snd-shrink" style="margin-left:8px">Jetzt verkleinern</button></div>`;
+  if (!list.length) h += `<div class="empty">Noch keine Musik.${pc ? ' „Musik hinzufügen“ tippen.' : ' Am PC hinzufügen und in einem Workout verwenden, dann hier „Holen“.'}</div>`;
+  h += '<div class="grid cols">' + list.map((x) => {
+    const n = soundUsedIn(x.id).length;
+    const here = mediaKeysHere.has(x.media);
+    const playing = previewAudio && previewAudio.dataset.id === x.id;
+    const mb = (v) => v >= 1048576 ? (v / 1048576).toFixed(1).replace('.', ',') + ' MB' : Math.max(1, Math.round(v / 1024)) + ' KB';
+    const sz = `${mb(x.size || 0)}${x.origSize && x.origSize > x.size ? ` statt ${mb(x.origSize)}` : ''}`;
+    return `<div class="card tight"><div class="card-row"><button class="icon-btn" data-a="snd-play" data-id="${x.id}" aria-label="Anhören" ${here ? '' : 'disabled'}>${ic(playing ? 'pause' : 'play')}</button>
+      <div class="grow"><div class="card-title">${esc(x.name)}</div><div class="card-sub">${x.dur ? mmss(x.dur) + ' · ' : ''}${sz}${n ? ` · in ${n} Workout${n > 1 ? 's' : ''}` : ''}${here ? '' : ' · <span style="color:var(--z4)">fehlt – bitte „Holen“</span>'}</div></div>
+      ${pc ? `<button class="icon-btn" data-a="snd-ren" data-id="${x.id}" title="Umbenennen" aria-label="Umbenennen">${ic('edit')}</button>${n ? '' : `<button class="icon-btn" data-a="snd-del" data-id="${x.id}" title="Löschen" aria-label="Löschen">${ic('trash')}</button>`}` : ''}</div></div>`;
   }).join('') + '</div></div>';
   return h;
 }
@@ -1119,6 +1232,7 @@ const ACTIONS = {
   'ex-undel': async (el) => { delete S.deleted[el.dataset.id]; await save(); render(); toast(`ID ${el.dataset.id} kommt beim nächsten „Aus Obsidian holen“ wieder.`); },
   // Musik
   'snd-play': (el) => previewSound(el.dataset.id),
+  'snd-shrink': () => shrinkExisting(),
   'snd-del': async (el) => { const s = S.sounds[el.dataset.id]; if (!s || !confirm(`„${s.name}“ löschen?`)) return; delete S.sounds[s.id]; await save(); await mediaCleanup(); render(); },
   'snd-ren': async (el) => { const s = S.sounds[el.dataset.id]; if (!s) return; const n = prompt('Neuer Name', s.name); if (n == null || !n.trim()) return; s.name = n.trim(); await save(); render(); },
   // Abgleich
@@ -1206,6 +1320,7 @@ if ('serviceWorker' in navigator) {
 (async function init() {
   $('#ver').textContent = 'v' + APP_VERSION;
   await loadData();
+  try { mediaKeysHere = new Set(await idbKeys('media')); } catch (e) { /* egal */ }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if (!isPC()) ui.tab = 'workouts';
   render();
