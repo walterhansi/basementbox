@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -90,7 +90,7 @@ const idbPut = (s, k, v) => idbReq(s, 'readwrite', (o) => o.put(v, k));
 const idbDel = (s, k) => idbReq(s, 'readwrite', (o) => o.delete(k));
 const idbKeys = (s) => idbReq(s, 'readonly', (o) => o.getAllKeys());
 
-function freshData() { return { app: 'basementbox', schema: 1, exercises: {}, sounds: {}, workouts: [], updatedAt: 0, dirty: false }; }
+function freshData() { return { app: 'basementbox', schema: 1, exercises: {}, sounds: {}, workouts: [], deleted: {}, updatedAt: 0, dirty: false }; }
 let S = freshData();
 async function loadData() {
   try { const d = await idbGet('kv', 'data'); if (d && d.app === 'basementbox') S = Object.assign(freshData(), d); } catch (e) { toast('Gerätespeicher nicht lesbar: ' + e.message, { error: true, timeout: 10000 }); }
@@ -283,6 +283,7 @@ async function obsPlan(root, dir) {
     const name = String(fm.name || fname.replace(/\.md$/i, '')).trim();
     const label = `${name}${id ? ' (ID ' + id + ')' : ''}`;
     if (!id) { P.skip.push(`${label}: keine ID in Obsidian`); continue; }
+    if (!have && S.deleted && S.deleted[id]) { P.skip.push(`${label}: in Basement Box gelöscht – kommt erst wieder, wenn du sie unter „Gelöschte Übungen“ zurückholst`); continue; }
     if (seen.has(id)) { P.warn.push(`ID ${id} kommt doppelt vor („${seen.get(id)}“ und „${name}“) – zweite Notiz übersprungen`); continue; }
     seen.set(id, name);
     if (have && !tick) P.keepNoTick++;
@@ -909,8 +910,12 @@ function viewExercises() {
   let h = `<div class="view-inner"><div class="page-head"><h1>Übungen</h1>${isPC() ? `<button class="btn" data-a="obs-open">${ic('download')}Aus Obsidian holen</button>` : ''}</div>
     ${isPC() ? '<p class="hint" style="margin:-6px 0 12px">In Obsidian das Häkchen „Übungsauswahl“ setzen, dann hier „Aus Obsidian holen“. Danach unter „Daten“ senden.</p>' : ''}
     <div class="search">${ic('search')}<input type="search" placeholder="ID oder Name" value="${esc(ui.exQ)}" data-in="ex-q"></div><div id="exList">`;
-  h += exListHtml(list) + '</div></div>';
-  return h;
+  h += exListHtml(list) + '</div>';
+  const del = Object.keys(S.deleted || {}).sort(idSort);
+  if (isPC() && del.length) h += `<div class="section-title">Gelöschte Übungen (${del.length})</div>
+    <p class="hint" style="margin:-4px 0 10px">Kommen beim „Aus Obsidian holen“ nicht wieder. In fitlog und Obsidian bleiben sie unverändert.</p>
+    <div class="btn-row">${del.map((id) => `<button class="btn sm ghost" data-a="ex-undel" data-id="${esc(id)}" title="Zurückholen">${ic('plus')}ID ${esc(id)}</button>`).join('')}</div>`;
+  return h + '</div>';
 }
 function exListHtml(list) {
   if (!Object.keys(S.exercises).length) return `<div class="empty">Noch keine Übungen.${isPC() ? ' „Aus Obsidian holen“ tippen.' : ''}</div>`;
@@ -1107,9 +1112,11 @@ const ACTIONS = {
   'ex-del': async (el) => {
     const id = el.dataset.id;
     if (exUsedIn(id).length) return;
-    if (!confirm(`Übung ID ${id} aus Basement Box entfernen? In Obsidian bleibt sie. Ohne Häkchen „Übungsauswahl“ kommt sie nicht wieder.`)) return;
-    delete S.exercises[id]; await save(); await mediaCleanup(); render();
+    if (!confirm(`Übung ID ${id} aus Basement Box entfernen? In Obsidian bleibt sie, und beim Holen kommt sie nicht wieder (unten unter „Gelöschte Übungen“ kannst du sie zurückholen).`)) return;
+    delete S.exercises[id]; S.deleted = S.deleted || {}; S.deleted[id] = Date.now();
+    await save(); await mediaCleanup(); render();
   },
+  'ex-undel': async (el) => { delete S.deleted[el.dataset.id]; await save(); render(); toast(`ID ${el.dataset.id} kommt beim nächsten „Aus Obsidian holen“ wieder.`); },
   // Musik
   'snd-play': (el) => previewSound(el.dataset.id),
   'snd-del': async (el) => { const s = S.sounds[el.dataset.id]; if (!s || !confirm(`„${s.name}“ löschen?`)) return; delete S.sounds[s.id]; await save(); await mediaCleanup(); render(); },
