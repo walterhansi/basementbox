@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.6.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -90,7 +90,7 @@ const idbPut = (s, k, v) => idbReq(s, 'readwrite', (o) => o.put(v, k));
 const idbDel = (s, k) => idbReq(s, 'readwrite', (o) => o.delete(k));
 const idbKeys = (s) => idbReq(s, 'readonly', (o) => o.getAllKeys());
 
-function freshData() { return { app: 'basementbox', schema: 1, exercises: {}, sounds: {}, workouts: [], deleted: {}, updatedAt: 0, dirty: false }; }
+function freshData() { return { app: 'basementbox', schema: 1, exercises: {}, sounds: {}, workouts: [], deleted: {}, imgTrim: 0, updatedAt: 0, dirty: false }; }
 let S = freshData();
 async function loadData() {
   try { const d = await idbGet('kv', 'data'); if (d && d.app === 'basementbox') S = Object.assign(freshData(), d); } catch (e) { toast('Gerätespeicher nicht lesbar: ' + e.message, { error: true, timeout: 10000 }); }
@@ -239,20 +239,57 @@ function obsTreeFromFiles(files) {
   return root;
 }
 // Bild verkleinern (längste Seite 1400 px), weißer Hintergrund wie im Buch
-function downscale(blob, max = 1400) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(blob); const img = new Image();
-    img.onload = () => {
-      const s = Math.min(1, max / Math.max(img.width, img.height));
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(img.width * s)); c.height = Math.max(1, Math.round(img.height * s));
-      const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0, c.width, c.height);
-      URL.revokeObjectURL(url);
-      c.toBlob((b) => b ? resolve(b) : reject(new Error('Bild nicht lesbar')), 'image/jpeg', 0.85);
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Bild nicht lesbar')); };
-    img.src = url;
-  });
+// Bild verkleinern (längste Seite 1400 px) und leeren weißen Rand abschneiden.
+// Liefert { blob, w, h }. In Obsidian bleibt das Bild unverändert.
+function loadImage(blob) {
+  return new Promise((res, rej) => { const u = URL.createObjectURL(blob); const i = new Image(); i.onload = () => { URL.revokeObjectURL(u); res(i); }; i.onerror = () => { URL.revokeObjectURL(u); rej(new Error('Bild nicht lesbar')); }; i.src = u; });
+}
+function contentBox(img) {
+  // Auf kleiner Kopie suchen, wo wirklich etwas zu sehen ist (nicht fast weiß, nicht durchsichtig)
+  const A = 400, s = Math.min(1, A / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * s)), h = Math.max(1, Math.round(img.height * s));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true }); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    if (d[i] < 232 || d[i + 1] < 232 || d[i + 2] < 232) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  if (x1 < 0) return { x: 0, y: 0, w: img.width, h: img.height };
+  const m = Math.round(Math.max(x1 - x0, y1 - y0) * 0.04) + 2; // schmaler Rand bleibt
+  x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(w - 1, x1 + m); y1 = Math.min(h - 1, y1 + m);
+  return { x: x0 / s, y: y0 / s, w: (x1 - x0 + 1) / s, h: (y1 - y0 + 1) / s };
+}
+async function prepareImage(blob, max = 1400) {
+  const img = await loadImage(blob);
+  const b = contentBox(img);
+  const s = Math.min(1, max / Math.max(b.w, b.h));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(b.w * s)); c.height = Math.max(1, Math.round(b.h * s));
+  const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(img, b.x, b.y, b.w, b.h, 0, 0, c.width, c.height);
+  const out = await new Promise((res, rej) => c.toBlob((x) => x ? res(x) : rej(new Error('Bild nicht lesbar')), 'image/jpeg', 0.85));
+  return { blob: out, w: c.width, h: c.height };
+}
+// Einmalig am PC: schon vorhandene Übungsbilder zuschneiden (Version 1.6)
+async function trimExistingImages() {
+  if (!isPC() || S.imgTrim === 1) return;
+  const list = Object.values(S.exercises).filter((e) => e.img);
+  if (!list.length) { S.imgTrim = 1; await save(false); return; }
+  toast(`Schneide ${list.length} Übungsbilder zu …`, { timeout: 4000 });
+  for (const ex of list) {
+    try {
+      const b = await idbGet('media', ex.img); if (!b) continue;
+      const r = await prepareImage(b);
+      const key = `img_${ex.id}_${(await sha256hex(r.blob)).slice(0, 16)}.jpg`;
+      await idbPut('media', key, r.blob);
+      ex.img = key; ex.imgW = r.w; ex.imgH = r.h;
+    } catch (e) { /* Bild bleibt */ }
+  }
+  S.imgTrim = 1;
+  await save(); await mediaCleanup(); render();
+  toast('Übungsbilder zugeschnitten. Bitte unter „Daten“ senden, damit Handy und Chromebook sie bekommen.', { timeout: 9000 });
 }
 async function obsStart() {
   if (typeof window.showDirectoryPicker !== 'function') {
@@ -346,10 +383,10 @@ async function obsApply() {
       ex.img = null; ex.imgSig = '';
       if (x.file) {
         try {
-          const b = await downscale(x.file);
-          const key = `img_${x.id}_${(await sha256hex(b)).slice(0, 16)}.jpg`;
-          await idbPut('media', key, b);
-          ex.img = key; ex.imgSig = x.sig;
+          const r = await prepareImage(x.file);
+          const key = `img_${x.id}_${(await sha256hex(r.blob)).slice(0, 16)}.jpg`;
+          await idbPut('media', key, r.blob);
+          ex.img = key; ex.imgSig = x.sig; ex.imgW = r.w; ex.imgH = r.h;
         } catch (e) { P.warn.push(`ID ${x.id}: Bild nicht lesbar`); }
       }
     }
@@ -717,6 +754,14 @@ function playClose() {
   $('#player-root').innerHTML = '';
 }
 // upcoming = Pause/Vorbereitung: Bild der nächsten Übung gedämpft und deutlich als „noch nicht“ markiert
+// Breite Bilder bekommen die volle Breite, wenn sie neben Name und Uhr zu klein würden
+function wideFor(ex) {
+  if (!ex || !ex.img || !ex.imgW || !ex.imgH) return false;
+  const ar = ex.imgW / ex.imgH, W = window.innerWidth, H = window.innerHeight;
+  if (H >= W || W < 640) return false; // Hochformat: Bild steht ohnehin über die ganze Breite
+  const slot = (W * 0.53) / Math.max(200, H - 230);
+  return ar > slot * 1.25;
+}
 function imgBox(ex, upcoming = false) {
   const ov = upcoming ? '<div class="pl-ov"><span>GLEICH</span><small>noch nicht ausführen</small></div>' : '';
   return ex && ex.img ? `<div class="pl-img ${upcoming ? 'upcoming' : ''}"><img data-media="${esc(ex.img)}" alt="">${ov}</div>` : `<div class="pl-img none ${upcoming ? 'upcoming' : ''}">${upcoming ? ov : 'kein Bild'}</div>`;
@@ -739,7 +784,7 @@ function renderPlayer() {
   if (s.kind === 'work') {
     const timed = !!s.dur;
     main = `${s.note ? `<div class="pl-note">${esc(s.note)}</div>` : ''}
-      <div class="pl-main ${s.ex.img ? '' : 'no-img'}">${imgBox(s.ex)}
+      <div class="pl-main ${s.ex.img ? '' : 'no-img'} ${wideFor(s.ex) ? 'wide' : ''}">${imgBox(s.ex)}
         <div class="pl-side"><div class="pl-name">${esc(s.ex.name)}<span class="pl-id">ID ${esc(s.ex.id)}</span></div>
           ${timed ? '<div class="pl-timer" id="plClock"></div>' : `${s.target ? `<div class="pl-target">${esc(s.target)}</div>` : ''}<div class="pl-elapsed" id="plClock"></div>`}
           ${s.ex.cue ? `<div class="pl-cue">${esc(s.ex.cue)}</div>` : ''}</div></div>`;
@@ -747,7 +792,7 @@ function renderPlayer() {
     const n = s.next;
     const showNote = n && n.noteNew && n.note;
     main = `${showNote ? `<div class="pl-note big">${esc(n.note)}</div>` : ''}
-      <div class="pl-main ${n && n.ex.img ? '' : 'no-img'}">${n ? imgBox(n.ex, true) : ''}
+      <div class="pl-main ${n && n.ex.img ? '' : 'no-img'} ${n && wideFor(n.ex) ? 'wide' : ''}">${n ? imgBox(n.ex, true) : ''}
         <div class="pl-side"><div class="pl-bigword">${s.kind === 'rest' ? 'PAUSE' : 'GLEICH GEHT’S LOS'}</div><div class="pl-timer" id="plClock"></div>
           ${n ? `<div class="pl-next"><div><small>Als Nächstes</small>${esc(n.ex.name)} <span class="pl-id" style="font-size:.6em;color:var(--z1);margin-left:6px">ID ${esc(n.ex.id)}</span>${n.target ? `<div class="pl-target" style="font-size:.9em">${esc(n.target)}</div>` : ''}</div></div>` : ''}
           ${n && n.ex.cue ? `<div class="pl-cue">${esc(n.ex.cue)}</div>` : ''}</div></div>`;
@@ -765,8 +810,22 @@ function renderPlayer() {
       <button data-a="play-pause" class="${P.paused ? 'on' : ''}" aria-label="${P.paused ? 'Weiter' : 'Pause'}">${ic(P.paused ? 'play' : 'pause', 'ic-lg')}</button>
       ${tap ? `<button class="pl-go" data-a="play-next">Weiter ${ic('next', 'ic-lg')}</button>` : `<button class="pl-go ph-hide" tabindex="-1"></button><button data-a="play-next" aria-label="Überspringen">${ic('next', 'ic-lg')}</button>`}
     </div></div>`;
-  hydrate(root);
+  hydrate(root).then(fitImages);
+  fitImages();
   updatePlayerClock();
+}
+// Bild so groß wie möglich in seinen Platz einpassen – auch kleine Bilder vergrößern; Weiß nur hinter dem Bild
+function fitImages() {
+  for (const box of $$('#player-root .pl-img')) {
+    const img = box.querySelector('img'); if (!img) continue;
+    const go = () => {
+      const iw = img.naturalWidth, ih = img.naturalHeight; if (!iw || !ih) return;
+      const bw = box.clientWidth, bh = box.clientHeight; if (!bw || !bh) return;
+      const k = Math.min(bw / iw, bh / ih);
+      img.style.width = Math.floor(iw * k) + 'px'; img.style.height = Math.floor(ih * k) + 'px';
+    };
+    if (img.complete && img.naturalWidth) go(); else img.onload = go;
+  }
 }
 function updatePlayerClock() {
   if (!P || P.done) return;
@@ -1312,6 +1371,8 @@ document.addEventListener('keydown', (ev) => {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') { if (P && !P.paused && !P.done) wakeOn(); syncCheck(); }
 });
+let resizeT = null;
+window.addEventListener('resize', () => { fitImages(); clearTimeout(resizeT); resizeT = setTimeout(() => { if (P && !P.done) renderPlayer(); }, 150); });
 if (window.speechSynthesis) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
 
 let swWaiting = null;
@@ -1339,4 +1400,5 @@ if ('serviceWorker' in navigator) {
   if (!isPC()) ui.tab = 'workouts';
   render();
   syncCheck();
+  trimExistingImages();
 })();

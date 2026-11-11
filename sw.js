@@ -1,6 +1,6 @@
 // Basement Box – Service Worker
 // Bei jeder neuen Version VERSION erhöhen, damit Geräte das Update erkennen.
-const VERSION = '1.5.1';
+const VERSION = '1.6.0';
 const CACHE = 'bbx-' + VERSION;
 const ASSETS = [
   './',
