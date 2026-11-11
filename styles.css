@@ -240,3 +240,18 @@ textarea { resize: vertical; }
   .pl-ctrl button { height: 52px; }
   .pl-cue { max-height: 5.6em; }
 }
+
+/* Pause / Vorbereitung: Bild der nächsten Übung klar als „noch nicht“ kennzeichnen */
+.player.ph-rest { background: linear-gradient(180deg, #0f2a2c 0%, var(--bg) 70%); }
+.player.ph-prep { background: linear-gradient(180deg, #0f2240 0%, var(--bg) 70%); }
+.pl-img.upcoming { position: relative; border: 4px dashed var(--z1); }
+.ph-prep .pl-img.upcoming { border-color: #4f8fd6; }
+.pl-img.upcoming img { filter: grayscale(1) brightness(0.75); opacity: 0.45; }
+.pl-img.upcoming.none { min-height: 120px; }
+.pl-ov { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: 14px; gap: 4px; pointer-events: none; }
+.pl-ov span { background: var(--bg); color: var(--z1); font-weight: 800; letter-spacing: .08em; font-size: clamp(1.6rem, 5vw, 3rem); padding: 6px 22px; border-radius: 12px; border: 3px solid var(--z1); }
+.ph-prep .pl-ov span { color: #fff; border-color: #4f8fd6; }
+.pl-ov small { background: var(--bg); color: var(--text); font-weight: 700; font-size: clamp(.9rem, 2.2vw, 1.2rem); padding: 3px 12px; border-radius: 8px; }
+.pl-bigword { font-size: clamp(1.6rem, 5vw, 3.2rem); font-weight: 800; letter-spacing: .06em; line-height: 1; order: 0; }
+.ph-rest .pl-bigword { color: var(--z1); }
+.ph-prep .pl-bigword { color: #fff; }

@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -716,8 +716,10 @@ function playClose() {
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   $('#player-root').innerHTML = '';
 }
-function imgBox(ex) {
-  return ex && ex.img ? `<div class="pl-img"><img data-media="${esc(ex.img)}" alt=""></div>` : '<div class="pl-img none">kein Bild</div>';
+// upcoming = Pause/Vorbereitung: Bild der nächsten Übung gedämpft und deutlich als „noch nicht“ markiert
+function imgBox(ex, upcoming = false) {
+  const ov = upcoming ? '<div class="pl-ov"><span>GLEICH</span><small>noch nicht ausführen</small></div>' : '';
+  return ex && ex.img ? `<div class="pl-img ${upcoming ? 'upcoming' : ''}"><img data-media="${esc(ex.img)}" alt="">${ov}</div>` : `<div class="pl-img none ${upcoming ? 'upcoming' : ''}">${upcoming ? ov : 'kein Bild'}</div>`;
 }
 function renderPlayer() {
   const root = $('#player-root');
@@ -745,8 +747,8 @@ function renderPlayer() {
     const n = s.next;
     const showNote = n && n.noteNew && n.note;
     main = `${showNote ? `<div class="pl-note big">${esc(n.note)}</div>` : ''}
-      <div class="pl-main ${n && n.ex.img ? '' : 'no-img'}">${n ? imgBox(n.ex) : ''}
-        <div class="pl-side"><div class="pl-timer" id="plClock"></div>
+      <div class="pl-main ${n && n.ex.img ? '' : 'no-img'}">${n ? imgBox(n.ex, true) : ''}
+        <div class="pl-side"><div class="pl-bigword">${s.kind === 'rest' ? 'PAUSE' : 'GLEICH GEHT’S LOS'}</div><div class="pl-timer" id="plClock"></div>
           ${n ? `<div class="pl-next"><div><small>Als Nächstes</small>${esc(n.ex.name)} <span class="pl-id" style="font-size:.6em;color:var(--z1);margin-left:6px">ID ${esc(n.ex.id)}</span>${n.target ? `<div class="pl-target" style="font-size:.9em">${esc(n.target)}</div>` : ''}</div></div>` : ''}
           ${n && n.ex.cue ? `<div class="pl-cue">${esc(n.ex.cue)}</div>` : ''}</div></div>`;
   }
