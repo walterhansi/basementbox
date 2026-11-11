@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Obsidian-Tresor umstellen – Basement Box</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<style>
+  :root { --bg: #131419; --surface: #1d1f27; --surface-2: #262935; --line: #343848; --text: #f2f3f6; --muted: #a9aebb; --z1: #00b5a6; --z3: #247d4d; --z4: #f9a73b; --z5: #cc2d3f; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, "Segoe UI", Roboto, Arial, sans-serif; padding: 28px 18px 60px; }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 1.7rem; margin-bottom: 4px; }
+  h2 { font-size: 1.15rem; margin: 22px 0 8px; }
+  p, li { color: var(--muted); }
+  b { color: var(--text); }
+  ol { margin: 8px 0 0 22px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin: 16px 0; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 22px; border-radius: 12px; border: none; background: var(--z4); color: #131419; font: inherit; font-weight: 800; cursor: pointer; }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.green { background: var(--z3); color: #fff; }
+  .callout { background: var(--surface-2); border-left: 4px solid var(--z1); border-radius: 10px; padding: 12px 14px; margin: 12px 0; }
+  .callout.warn { border-left-color: var(--z4); }
+  .callout.bad { border-left-color: var(--z5); }
+  .ok { color: var(--z1); font-weight: 700; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td:first-child { color: var(--muted); }
+  code { background: var(--surface-2); padding: 1px 6px; border-radius: 6px; font-size: .9em; color: var(--text); }
+  ul.ex { margin: 6px 0 0 20px; font-size: .9rem; }
+  label.chk { display: flex; gap: 10px; align-items: flex-start; margin: 12px 0; color: var(--text); cursor: pointer; }
+  label.chk input { width: 22px; height: 22px; margin-top: 2px; }
+  .bar { height: 10px; background: var(--surface-2); border-radius: 5px; overflow: hidden; margin-top: 12px; }
+  .bar > div { height: 100%; width: 0; background: var(--z4); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Obsidian-Tresor umstellen</h1>
+  <p>Einmalige Umstellung für fitlog und Basement Box: Das Häkchen <b>fitlog_auswahl</b> heißt danach <b>Übungsauswahl</b>, und aus der ID <b>UE-1656</b> wird <b>1656</b>.</p>
+
+  <div class="card" id="step1">
+    <h2 style="margin-top:0">1. Vorher sichern</h2>
+    <ol>
+      <li><b>Obsidian schließen.</b></li>
+      <li>Im Windows-Explorer <code>E:\Alfi\Exercises</code> öffnen.</li>
+      <li>Den Ordner <b>master exercise db obsidian</b> anklicken, <b>Strg+C</b> und dann <b>Strg+V</b> drücken. Es entsteht eine Kopie „… – Kopie“. Das ist deine Sicherung.</li>
+    </ol>
+    <label class="chk"><input type="checkbox" id="saved"> Ich habe Obsidian geschlossen und die Kopie angelegt.</label>
+    <button class="btn" id="pick" disabled>2. Tresor-Ordner wählen und prüfen</button>
+    <p id="nochrome" class="callout bad" hidden>Dieser Browser kann keine Dateien im Ordner ändern. Bitte diese Seite in <b>Google Chrome</b> am PC öffnen.</p>
+  </div>
+
+  <div class="card" id="report" hidden></div>
+  <div class="card" id="done" hidden></div>
+</main>
+<script>
+'use strict';
+const OLD_KEY = 'fitlog_auswahl';
+const NEW_KEY = 'Übungsauswahl';
+const SKIP_DIRS = new Set(['.git', '.trash', 'node_modules']);
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let root = null, plan = null;
+
+if (typeof window.showDirectoryPicker !== 'function') { $('#nochrome').hidden = false; $('#saved').disabled = true; }
+$('#saved').addEventListener('change', (e) => { $('#pick').disabled = !e.target.checked; });
+$('#pick').addEventListener('click', async () => {
+  try { root = await window.showDirectoryPicker({ id: 'bbx-tresor', mode: 'readwrite' }); }
+  catch (e) { if (e.name !== 'AbortError') alert('Ordner konnte nicht geöffnet werden: ' + e.message); return; }
+  if (!(await child(root, 'Übungen', 'directory'))) {
+    alert('In diesem Ordner fehlt der Unterordner „Übungen“. Bitte den Ordner „master exercise db obsidian“ wählen (nicht die Kopie).');
+    return;
+  }
+  $('#report').hidden = false;
+  $('#report').innerHTML = '<p>Lese alle Notizen …</p>';
+  plan = await scan(root);
+  showReport();
+});
+
+async function child(dir, name, kind) { for await (const [n, h] of dir.entries()) if (h.kind === kind && n.normalize('NFC') === name.normalize('NFC')) return h; return null; }
+async function* walk(dir, path = '') {
+  for await (const [name, h] of dir.entries()) {
+    const p = path + name;
+    if (h.kind === 'directory') { if (!SKIP_DIRS.has(name)) yield* walk(h, p + '/'); }
+    else yield [p, h];
+  }
+}
+
+// Frontmatter einer Notiz umstellen. Liefert neuen Text oder null (keine Änderung) und Notizen zum Bericht.
+function convertNote(text, info) {
+  const nl = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split(/\r?\n/);
+  if (lines[0].replace(/^\uFEFF/, '') !== '---') return null;
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) if (lines[i] === '---') { end = i; break; }
+  if (end < 0) return null;
+  let changed = false;
+  const hasNew = lines.slice(1, end).some((l) => l.normalize('NFC').startsWith(NEW_KEY + ':'));
+  for (let i = 1; i < end; i++) {
+    const l = lines[i];
+    const mk = l.match(/^fitlog_auswahl(\s*:.*)$/);
+    if (mk) {
+      if (hasNew) { info.both.push(info.path); continue; }
+      lines[i] = NEW_KEY + mk[1]; changed = true; info.tick = true;
+      continue;
+    }
+    const mi = l.match(/^id(\s*):\s*(["']?)UE[\s_-]*0*(\d+)\2\s*$/i);
+    if (mi) { lines[i] = `id: "${parseInt(mi[3], 10)}"`; changed = true; info.id = String(parseInt(mi[3], 10)); }
+    else if (/^id\s*:/.test(l)) { const v = l.replace(/^id\s*:\s*/, '').replace(/["']/g, '').trim(); if (v) info.id = v; }
+  }
+  return changed ? lines.join(nl) : null;
+}
+
+async function scan(rootDir) {
+  const P = { notes: 0, changes: [], ticks: 0, ids: 0, both: [], base: [], types: null, ueInNames: [], ueInText: [], dupIds: [], read: 0 };
+  const idOwner = new Map();
+  for await (const [path, h] of walk(rootDir)) {
+    const low = path.toLowerCase();
+    if (/(^|\/)UE[\s_-]*\d+/i.test(path)) P.ueInNames.push(path);
+    if (low === '.obsidian/types.json') {
+      const t = await (await h.getFile()).text();
+      try { const j = JSON.parse(t); const tj = j.types || j; if (OLD_KEY in tj) P.types = { h, j, tj }; } catch (e) { /* egal */ }
+      continue;
+    }
+    if (low.startsWith('.obsidian/')) continue;
+    if (low.endsWith('.base')) {
+      const t = await (await h.getFile()).text();
+      if (t.includes(OLD_KEY) || t.includes('fitlog-Auswahl')) P.base.push({ path, h, text: t });
+      continue;
+    }
+    if (!low.endsWith('.md')) continue;
+    P.notes++;
+    if (P.notes % 100 === 0) $('#report').innerHTML = `<p>Lese alle Notizen … ${P.notes}</p>`;
+    const text = await (await h.getFile()).text();
+    const info = { path, both: P.both, tick: false, id: '' };
+    const out = convertNote(text, info);
+    if (info.id) {
+      if (idOwner.has(info.id)) P.dupIds.push(`ID ${info.id}: ${idOwner.get(info.id)} und ${path}`);
+      else idOwner.set(info.id, path);
+    }
+    // „UE-…“ im Text außerhalb der ID-Zeile (z. B. Verweise auf andere Übungen)
+    const rest = (out || text).replace(/^id\s*:.*$/m, '');
+    const m = rest.match(/UE[-_]\d{2,}/g);
+    if (m) P.ueInText.push(`${path}: ${[...new Set(m)].slice(0, 4).join(', ')}`);
+    if (out) { P.changes.push({ path, h, out }); if (info.tick) P.ticks++; if (out.match(/^id: "\d+"$/m) && /^id\s*:\s*["']?UE/im.test(text)) P.ids++; }
+  }
+  return P;
+}
+
+function showReport() {
+  const P = plan;
+  const list = (a, n = 12) => `<ul class="ex">${a.slice(0, n).map((x) => `<li>${esc(x)}</li>`).join('')}${a.length > n ? `<li>… und ${a.length - n} weitere</li>` : ''}</ul>`;
+  const nothing = !P.changes.length && !P.base.length && !P.types;
+  let h = `<h2 style="margin-top:0">3. Prüfbericht</h2><table>
+    <tr><td>Notizen gelesen</td><td><b>${P.notes}</b></td></tr>
+    <tr><td>Notizen, die geändert werden</td><td><b>${P.changes.length}</b></td></tr>
+    <tr><td>davon ID „UE-…“ → Zahl</td><td><b>${P.ids}</b></td></tr>
+    <tr><td>davon Häkchen umbenannt</td><td><b>${P.ticks}</b></td></tr>
+    <tr><td>Ansichten (.base), die angepasst werden</td><td><b>${P.base.length}</b> ${P.base.map((b) => esc(b.path)).join(', ')}</td></tr>
+    <tr><td>Eigenschaftstyp in Obsidian</td><td>${P.types ? '<b>wird umbenannt</b> (Kontrollkästchen bleibt Kontrollkästchen)' : 'nichts zu tun'}</td></tr></table>`;
+  if (P.dupIds.length) h += `<div class="callout bad"><b>Doppelte IDs</b> – bitte nach der Umstellung in Obsidian prüfen:${list(P.dupIds)}</div>`;
+  if (P.both.length) h += `<div class="callout warn"><b>Beide Häkchen vorhanden</b> – hier bleibt das alte Häkchen stehen, bitte von Hand entfernen:${list(P.both)}</div>`;
+  if (P.ueInNames.length) h += `<div class="callout warn"><b>„UE-…“ in Datei- oder Ordnernamen</b> (${P.ueInNames.length}) – werden <b>nicht</b> umbenannt, damit keine Verknüpfung abreißt. Das stört fitlog und Basement Box nicht.${list(P.ueInNames, 6)}</div>`;
+  if (P.ueInText.length) h += `<div class="callout warn"><b>„UE-…“ im Notiztext</b> (${P.ueInText.length} Notizen) – bleibt unverändert, ist nur zur Info.${list(P.ueInText, 6)}</div>`;
+  if (nothing) h += '<div class="callout"><span class="ok">Nichts zu tun</span> – der Tresor ist bereits umgestellt.</div>';
+  else h += `<p style="margin-top:14px">Geändert wird nur der Kopfbereich (Eigenschaften) der Notizen. Text, Bilder und Dateinamen bleiben, wie sie sind.</p>
+    <button class="btn green" id="go" style="margin-top:12px">4. Jetzt umstellen</button><div class="bar" id="bar" hidden><div></div></div>`;
+  $('#report').innerHTML = h;
+  const go = $('#go');
+  if (go) go.addEventListener('click', apply);
+}
+
+async function writeText(h, text) { const w = await h.createWritable(); await w.write(text); await w.close(); }
+async function apply() {
+  const P = plan;
+  $('#go').disabled = true; $('#bar').hidden = false;
+  const total = P.changes.length + P.base.length + (P.types ? 1 : 0);
+  let n = 0, errors = [];
+  const step = () => { n++; $('#bar').firstElementChild.style.width = Math.round(n / total * 100) + '%'; };
+  for (const c of P.changes) { try { await writeText(c.h, c.out); } catch (e) { errors.push(`${c.path}: ${e.message}`); } step(); }
+  for (const b of P.base) {
+    try { await writeText(b.h, b.text.split(OLD_KEY).join(NEW_KEY).split('fitlog-Auswahl').join('Übungsauswahl')); } catch (e) { errors.push(`${b.path}: ${e.message}`); }
+    step();
+  }
+  if (P.types) {
+    try {
+      const { h, j, tj } = P.types;
+      if (!(NEW_KEY in tj)) tj[NEW_KEY] = tj[OLD_KEY];
+      delete tj[OLD_KEY];
+      await writeText(h, JSON.stringify(j, null, 2));
+    } catch (e) { errors.push('.obsidian/types.json: ' + e.message); }
+    step();
+  }
+  $('#done').hidden = false;
+  $('#done').innerHTML = errors.length
+    ? `<h2 style="margin-top:0">Teilweise fehlgeschlagen</h2><div class="callout bad">${errors.length} Datei(en) konnten nicht geschrieben werden:<ul class="ex">${errors.slice(0, 20).map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div><p>Bitte Claude Bescheid geben. Deine Sicherungskopie ist unverändert.</p>`
+    : `<h2 style="margin-top:0"><span class="ok">Fertig.</span></h2><p>${P.changes.length} Notizen umgestellt${P.base.length ? `, ${P.base.length} Ansicht(en) angepasst` : ''}.</p>
+       <ol><li>Obsidian öffnen und eine Übung ansehen: Die ID ist jetzt eine Zahl, das Häkchen heißt „Übungsauswahl“.</li>
+       <li>In fitlog am PC <b>Aus Obsidian holen</b>: Es sollte „Nichts Neues“ oder nur Aktualisierungen zeigen, keine Fehler.</li>
+       <li>Wenn alles passt, kannst du die Sicherungskopie später löschen.</li></ol>`;
+  $('#go').textContent = errors.length ? 'Mit Fehlern beendet' : 'Erledigt';
+}
+</script>
+</body>
+</html>
