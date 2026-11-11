@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -792,10 +792,14 @@ function renderPlayer() {
     const n = s.next;
     const showNote = n && n.noteNew && n.note;
     main = `${showNote ? `<div class="pl-note big">${esc(n.note)}</div>` : ''}
-      <div class="pl-main ${n && n.ex.img ? '' : 'no-img'} ${n && wideFor(n.ex) ? 'wide' : ''}">${n ? imgBox(n.ex, true) : ''}
-        <div class="pl-side"><div class="pl-bigword">${s.kind === 'rest' ? 'PAUSE' : 'GLEICH GEHT’S LOS'}</div><div class="pl-timer" id="plClock"></div>
-          ${n ? `<div class="pl-next"><div><small>Als Nächstes</small>${esc(n.ex.name)} <span class="pl-id" style="font-size:.6em;color:var(--z1);margin-left:6px">ID ${esc(n.ex.id)}</span>${n.target ? `<div class="pl-target" style="font-size:.9em">${esc(n.target)}</div>` : ''}</div></div>` : ''}
-          ${n && n.ex.cue ? `<div class="pl-cue">${esc(n.ex.cue)}</div>` : ''}</div></div>`;
+      <div class="pl-rest ${n && n.ex.img ? '' : 'no-img'}">
+        <div class="pr-text">
+          <div class="pr-head"><span class="pl-bigword">${s.kind === 'rest' ? 'PAUSE' : 'GLEICH GEHT’S LOS'}</span><span class="pl-timer" id="plClock"></span></div>
+          ${n ? `<div class="pr-next"><small>Als Nächstes</small><div class="pr-name">${esc(n.ex.name)} <span class="pl-id">ID ${esc(n.ex.id)}</span></div>${n.target ? `<div class="pr-target">${esc(n.target)}</div>` : ''}</div>` : ''}
+          ${n && n.ex.cue ? `<div class="pr-cue">${esc(n.ex.cue)}</div>` : ''}
+        </div>
+        ${n && n.ex.img ? `<div class="pr-img">${imgBox(n.ex, true)}</div>` : ''}
+      </div>`;
   }
   const tap = s.kind === 'work' && !s.dur;
   root.innerHTML = `<div class="player ${phase}">

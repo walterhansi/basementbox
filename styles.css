@@ -269,3 +269,42 @@ textarea { resize: vertical; }
   .pl-main.wide .pl-bigword { font-size: clamp(1.4rem, 3.5vw, 2.4rem); }
   .pl-main.wide .pl-cue { flex-basis: 100%; max-height: 3.2em; }
 }
+
+/* ===== 1.7: Übung = Bild im Fokus, Pause = Text im Fokus ===== */
+/* Übung: Bild groß, Begleittext klein */
+.ph-work .pl-cue { font-size: 0.8rem; line-height: 1.35; max-height: 2.8em; opacity: 0.75; }
+.ph-work .pl-name { font-size: clamp(1.4rem, 5.5vw, 2.6rem); }
+.ph-work .pl-timer { font-size: clamp(3rem, 14vw, 6.5rem); }
+.ph-work .pl-target { font-size: clamp(2rem, 8vw, 4rem); }
+@media (orientation: landscape) and (min-width: 640px) {
+  .ph-work .pl-main:not(.wide):not(.no-img) { grid-template-columns: minmax(0, 2.2fr) minmax(0, 1fr); }
+  .ph-work .pl-name { font-size: clamp(1.4rem, 2.8vw, 2.6rem); }
+  .ph-work .pl-timer { font-size: clamp(3.5rem, 9vw, 8rem); }
+  .ph-work .pl-cue { max-height: 4.2em; }
+}
+/* Pause/Vorbereitung: Text groß, Vorschaubild klein */
+.pl-rest { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+.pr-text { display: contents; }
+.pr-head { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; order: 0; }
+.pr-head .pl-timer { font-size: clamp(3rem, 13vw, 6rem); }
+.pr-next { order: 1; }
+.pr-next small { display: block; font-size: 0.85rem; color: var(--muted); font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+.pr-name { font-size: clamp(1.8rem, 7vw, 3.4rem); font-weight: 800; line-height: 1.1; overflow-wrap: anywhere; }
+.pr-name .pl-id { font-size: 0.45em; color: var(--z1); margin-left: 6px; vertical-align: middle; }
+.pr-target { font-size: clamp(1.6rem, 6vw, 2.8rem); font-weight: 800; color: var(--work-text); }
+.pr-img { order: 2; height: 20vh; min-height: 100px; flex-shrink: 0; }
+.pr-img .pl-img { height: 100%; }
+.pr-cue { order: 3; flex: 1; min-height: 0; overflow-y: auto; font-size: clamp(1.15rem, 4.4vw, 1.6rem); line-height: 1.5; color: var(--text); white-space: pre-line; }
+.pr-img .pl-ov { padding-top: 6px; }
+.pr-img .pl-ov span { font-size: clamp(0.9rem, 2.4vw, 1.3rem); padding: 3px 12px; border-width: 2px; }
+.pr-img .pl-ov small { font-size: 0.75rem; }
+.pr-img .pl-img.upcoming { border-width: 3px; }
+@media (orientation: landscape) and (min-width: 640px) {
+  .pl-rest { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); align-items: start; column-gap: 22px; }
+  .pl-rest.no-img { grid-template-columns: 1fr; }
+  .pr-text { display: flex; flex-direction: column; gap: 10px; min-height: 0; height: 100%; }
+  .pr-img { height: auto; aspect-ratio: 1 / 1; max-height: 55vh; width: 100%; }
+  .pr-name { font-size: clamp(1.8rem, 3.6vw, 3.4rem); }
+  .pr-cue { font-size: clamp(1.15rem, 2vw, 1.6rem); }
+  .pr-head .pl-timer { font-size: clamp(3rem, 8vw, 6.5rem); }
+}
