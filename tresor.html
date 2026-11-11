@@ -41,14 +41,13 @@
   <p>Einmalige Umstellung für fitlog und Basement Box: Das Häkchen <b>fitlog_auswahl</b> heißt danach <b>Übungsauswahl</b>, und aus der ID <b>UE-1656</b> wird <b>1656</b>.</p>
 
   <div class="card" id="step1">
-    <h2 style="margin-top:0">1. Vorher sichern</h2>
+    <h2 style="margin-top:0">1. Vorbereiten</h2>
     <ol>
       <li><b>Obsidian schließen.</b></li>
-      <li>Im Windows-Explorer <code>E:\Alfi\Exercises</code> öffnen.</li>
-      <li>Den Ordner <b>master exercise db obsidian</b> anklicken, <b>Strg+C</b> und dann <b>Strg+V</b> drücken. Es entsteht eine Kopie „… – Kopie“. Das ist deine Sicherung.</li>
+      <li>Gleich den Ordner <code>E:\Alfi\Exercises</code> wählen (den Ordner, in dem „master exercise db obsidian“ liegt). Vor dem Umstellen legt diese Seite dort automatisch eine Sicherung aller Notizen an: <b>Sicherung Tresor vor Umstellung</b> mit Datum.</li>
     </ol>
-    <label class="chk"><input type="checkbox" id="saved"> Ich habe Obsidian geschlossen und die Kopie angelegt.</label>
-    <button class="btn" id="pick" disabled>2. Tresor-Ordner wählen und prüfen</button>
+    <label class="chk"><input type="checkbox" id="saved"> Obsidian ist geschlossen.</label>
+    <button class="btn" id="pick" disabled>2. Ordner „Exercises“ wählen und prüfen</button>
     <p id="nochrome" class="callout bad" hidden>Dieser Browser kann keine Dateien im Ordner ändern. Bitte diese Seite in <b>Google Chrome</b> am PC öffnen.</p>
   </div>
 
@@ -62,15 +61,17 @@ const NEW_KEY = 'Übungsauswahl';
 const SKIP_DIRS = new Set(['.git', '.trash', 'node_modules']);
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-let root = null, plan = null;
+let root = null, parent = null, plan = null;
+const VAULT = 'master exercise db obsidian';
 
 if (typeof window.showDirectoryPicker !== 'function') { $('#nochrome').hidden = false; $('#saved').disabled = true; }
 $('#saved').addEventListener('change', (e) => { $('#pick').disabled = !e.target.checked; });
 $('#pick').addEventListener('click', async () => {
-  try { root = await window.showDirectoryPicker({ id: 'bbx-tresor', mode: 'readwrite' }); }
+  try { parent = await window.showDirectoryPicker({ id: 'bbx-tresor', mode: 'readwrite' }); }
   catch (e) { if (e.name !== 'AbortError') alert('Ordner konnte nicht geöffnet werden: ' + e.message); return; }
-  if (!(await child(root, 'Übungen', 'directory'))) {
-    alert('In diesem Ordner fehlt der Unterordner „Übungen“. Bitte den Ordner „master exercise db obsidian“ wählen (nicht die Kopie).');
+  root = await child(parent, VAULT, 'directory');
+  if (!root || !(await child(root, 'Übungen', 'directory'))) {
+    alert('Bitte den Ordner „Exercises“ wählen – den, in dem „' + VAULT + '“ liegt.');
     return;
   }
   $('#report').hidden = false;
@@ -116,8 +117,10 @@ function convertNote(text, info) {
 async function scan(rootDir) {
   const P = { notes: 0, changes: [], ticks: 0, ids: 0, both: [], base: [], types: null, ueInNames: [], ueInText: [], dupIds: [], read: 0 };
   const idOwner = new Map();
+  P.backup = [];
   for await (const [path, h] of walk(rootDir)) {
     const low = path.toLowerCase();
+    if (/\.(md|base|json|canvas)$/.test(low)) P.backup.push([path, h]);
     if (/(^|\/)UE[\s_-]*\d+/i.test(path)) P.ueInNames.push(path);
     if (low === '.obsidian/types.json') {
       const t = await (await h.getFile()).text();
@@ -165,7 +168,7 @@ function showReport() {
   if (P.ueInNames.length) h += `<div class="callout warn"><b>„UE-…“ in Datei- oder Ordnernamen</b> (${P.ueInNames.length}) – werden <b>nicht</b> umbenannt, damit keine Verknüpfung abreißt. Das stört fitlog und Basement Box nicht.${list(P.ueInNames, 6)}</div>`;
   if (P.ueInText.length) h += `<div class="callout warn"><b>„UE-…“ im Notiztext</b> (${P.ueInText.length} Notizen) – bleibt unverändert, ist nur zur Info.${list(P.ueInText, 6)}</div>`;
   if (nothing) h += '<div class="callout"><span class="ok">Nichts zu tun</span> – der Tresor ist bereits umgestellt.</div>';
-  else h += `<p style="margin-top:14px">Geändert wird nur der Kopfbereich (Eigenschaften) der Notizen. Text, Bilder und Dateinamen bleiben, wie sie sind.</p>
+  else h += `<p style="margin-top:14px">Zuerst wird eine Sicherung von ${P.backup.length} Notiz- und Einstellungsdateien angelegt. Geändert wird danach nur der Kopfbereich (Eigenschaften) der Notizen. Text, Bilder und Dateinamen bleiben, wie sie sind.</p>
     <button class="btn green" id="go" style="margin-top:12px">4. Jetzt umstellen</button><div class="bar" id="bar" hidden><div></div></div>`;
   $('#report').innerHTML = h;
   const go = $('#go');
@@ -173,9 +176,34 @@ function showReport() {
 }
 
 async function writeText(h, text) { const w = await h.createWritable(); await w.write(text); await w.close(); }
+async function makeBackup(P) {
+  const d = new Date(), pad = (n) => String(n).padStart(2, '0');
+  const name = `Sicherung Tresor vor Umstellung ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}-${pad(d.getMinutes())}`;
+  const bdir = await parent.getDirectoryHandle(name, { create: true });
+  const vdir = await bdir.getDirectoryHandle(VAULT, { create: true });
+  let i = 0;
+  for (const [path, h] of P.backup) {
+    const parts = path.split('/');
+    let dir = vdir;
+    for (const seg of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(seg, { create: true });
+    const fh = await dir.getFileHandle(parts[parts.length - 1], { create: true });
+    const w = await fh.createWritable(); await w.write(await h.getFile()); await w.close();
+    if (++i % 50 === 0) $('#bar').firstElementChild.style.width = Math.round(i / P.backup.length * 100) + '%';
+  }
+  // Prüfen: Anzahl stimmt?
+  let count = 0;
+  for await (const _ of walk(vdir)) count++;
+  if (count !== P.backup.length) throw new Error(`Sicherung unvollständig (${count} von ${P.backup.length} Dateien)`);
+  return name;
+}
 async function apply() {
   const P = plan;
   $('#go').disabled = true; $('#bar').hidden = false;
+  $('#go').textContent = 'Sichere …';
+  try { P.backupName = await makeBackup(P); }
+  catch (e) { $('#go').textContent = 'Abgebrochen'; $('#done').hidden = false; $('#done').innerHTML = `<div class="callout bad">Sicherung fehlgeschlagen: ${esc(e.message)}. Es wurde nichts umgestellt.</div>`; return; }
+  $('#go').textContent = 'Stelle um …';
+  $('#bar').firstElementChild.style.width = '0%';
   const total = P.changes.length + P.base.length + (P.types ? 1 : 0);
   let n = 0, errors = [];
   const step = () => { n++; $('#bar').firstElementChild.style.width = Math.round(n / total * 100) + '%'; };
@@ -196,7 +224,7 @@ async function apply() {
   $('#done').hidden = false;
   $('#done').innerHTML = errors.length
     ? `<h2 style="margin-top:0">Teilweise fehlgeschlagen</h2><div class="callout bad">${errors.length} Datei(en) konnten nicht geschrieben werden:<ul class="ex">${errors.slice(0, 20).map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div><p>Bitte Claude Bescheid geben. Deine Sicherungskopie ist unverändert.</p>`
-    : `<h2 style="margin-top:0"><span class="ok">Fertig.</span></h2><p>${P.changes.length} Notizen umgestellt${P.base.length ? `, ${P.base.length} Ansicht(en) angepasst` : ''}.</p>
+    : `<h2 style="margin-top:0"><span class="ok">Fertig.</span></h2><p>${P.changes.length} Notizen umgestellt${P.base.length ? `, ${P.base.length} Ansicht(en) angepasst` : ''}. Sicherung (${P.backup.length} Dateien): <b>E:\\Alfi\\Exercises\\${esc(P.backupName)}</b></p>
        <ol><li>Obsidian öffnen und eine Übung ansehen: Die ID ist jetzt eine Zahl, das Häkchen heißt „Übungsauswahl“.</li>
        <li>In fitlog am PC <b>Aus Obsidian holen</b>: Es sollte „Nichts Neues“ oder nur Aktualisierungen zeigen, keine Fehler.</li>
        <li>Wenn alles passt, kannst du die Sicherungskopie später löschen.</li></ol>`;
