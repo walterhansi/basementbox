@@ -1,4 +1,4 @@
-# Basement Box
+# basementBOX
 
 Workout-Begleiter für das Training im Keller oder im Garten (private Nutzung).
 

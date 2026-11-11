@@ -1,7 +1,7 @@
 {
   "id": "/basementbox/",
-  "name": "Basement Box",
-  "short_name": "Basement Box",
+  "name": "basementBOX",
+  "short_name": "basementBOX",
   "description": "Workout-Begleiter für das Training im Keller",
   "lang": "de",
   "start_url": "./",

@@ -1,4 +1,4 @@
-/* Basement Box – App-Logik
+/* basementBOX – App-Logik
    Am PC: Übungen aus Obsidian holen, Musik laden, Workouts zusammenstellen, Senden.
    Am Handy/Chromebook: Holen und Workout in Echtzeit abspielen (auch ohne Internet).
    Daten: IndexedDB „basementbox“ (eigene Ablage, fitlog wird nicht berührt).
@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.8.1';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -295,7 +295,7 @@ async function obsStart() {
   if (typeof window.showDirectoryPicker !== 'function') {
     openModal(`${modalHead('Obsidian-Ordner wählen')}
       <p class="small">Im nächsten Fenster den Ordner <b>master exercise db obsidian</b> anklicken und <b>Hochladen</b> bzw. <b>Ordner auswählen</b> drücken.</p>
-      <div class="callout">Der Browser spricht von „hochladen“. Die Dateien bleiben aber auf deinem PC, Basement Box liest sie nur.</div>
+      <div class="callout">Der Browser spricht von „hochladen“. Die Dateien bleiben aber auf deinem PC, <span class="bbx"><b>basement</b>BOX</span> liest sie nur.</div>
       <div class="modal-foot"><button class="btn ghost" data-a="modal-close">Abbrechen</button>
       <label class="btn">${ic('download')}Ordner wählen<input type="file" webkitdirectory multiple hidden data-c="obs-dir"></label></div>`);
     return;
@@ -330,7 +330,7 @@ async function obsPlan(root, dir) {
     const name = String(fm.name || fname.replace(/\.md$/i, '')).trim();
     const label = `${name}${id ? ' (ID ' + id + ')' : ''}`;
     if (!id) { P.skip.push(`${label}: keine ID in Obsidian`); continue; }
-    if (!have && S.deleted && S.deleted[id]) { P.skip.push(`${label}: in Basement Box gelöscht – kommt erst wieder, wenn du sie unter „Gelöschte Übungen“ zurückholst`); continue; }
+    if (!have && S.deleted && S.deleted[id]) { P.skip.push(`${label}: in basementBOX gelöscht – kommt erst wieder, wenn du sie unter „Gelöschte Übungen“ zurückholst`); continue; }
     if (seen.has(id)) { P.warn.push(`ID ${id} kommt doppelt vor („${seen.get(id)}“ und „${name}“) – zweite Notiz übersprungen`); continue; }
     seen.set(id, name);
     if (have && !tick) P.keepNoTick++;
@@ -361,8 +361,8 @@ function obsPreviewHtml() {
   if (P.upd.length) h += `<div class="section-title">Aktualisiert (${P.upd.length})</div>${list(P.upd.map((u) => `<b>ID ${esc(u.id)}</b> ${esc(u.name)}: <span class="faint">${u.what.join(', ')}</span>`))}`;
   if (P.warn.length) h += `<div class="section-title">Hinweise (${P.warn.length})</div>${list(P.warn.map(esc))}`;
   if (P.skip.length) h += `<div class="section-title">Nicht übernommen (${P.skip.length})</div>${list(P.skip.map(esc))}`;
-  if (P.keepNoTick) h += `<p class="hint">${P.keepNoTick} Übung(en) haben in Obsidian kein Häkchen „Übungsauswahl“ mehr, sind aber schon in Basement Box. Sie bleiben und werden weiter aktualisiert.</p>`;
-  if (nothing) h += '<div class="callout">Nichts Neues – Basement Box ist auf dem Stand von Obsidian.</div>';
+  if (P.keepNoTick) h += `<p class="hint">${P.keepNoTick} Übung(en) haben in Obsidian kein Häkchen „Übungsauswahl“ mehr, sind aber schon in <span class="bbx"><b>basement</b>BOX</span>. Sie bleiben und werden weiter aktualisiert.</p>`;
+  if (nothing) h += '<div class="callout">Nichts Neues – <span class="bbx"><b>basement</b>BOX</span> ist auf dem Stand von Obsidian.</div>';
   h += `<div class="progress" id="obsProg" hidden><div></div></div>
     <div class="modal-foot"><button class="btn ghost" data-a="modal-close">${nothing ? 'Schließen' : 'Abbrechen'}</button>${nothing ? '' : '<button class="btn" data-a="obs-apply" id="obsApply">Übernehmen</button>'}</div>`;
   return h;
@@ -452,7 +452,7 @@ function oggOpus(packets, samples) {
   const head = new Uint8Array(19); const hv = new DataView(head.buffer);
   head.set([...'OpusHead'].map((c) => c.charCodeAt(0)), 0); head[8] = 1; head[9] = 1; hv.setUint16(10, OPUS_PRESKIP, true); hv.setUint32(12, SND_RATE, true);
   page([head], 0, 2);
-  const vendor = new TextEncoder().encode('Basement Box'); const tags = new Uint8Array(8 + 4 + vendor.length + 4); const tv = new DataView(tags.buffer);
+  const vendor = new TextEncoder().encode('basementBOX'); const tags = new Uint8Array(8 + 4 + vendor.length + 4); const tv = new DataView(tags.buffer);
   tags.set([...'OpusTags'].map((c) => c.charCodeAt(0)), 0); tv.setUint32(8, vendor.length, true); tags.set(vendor, 12); tv.setUint32(12 + vendor.length, 0, true);
   page([tags], 0, 0);
   let cur = [], segs = 0, size = 0, gran = OPUS_PRESKIP;
@@ -960,7 +960,7 @@ async function syncSend(force = false) {
     for (let attempt = 0; ; attempt++) {
       try {
         const tree = await gh(`/repos/${st.R}/git/trees`, { method: 'POST', body: { base_tree: st.treeSha, tree: entries.filter((e) => e.sha !== null || st.files[e.path]) } });
-        const c = await gh(`/repos/${st.R}/git/commits`, { method: 'POST', body: { message: `Basement Box – ${deviceName()}: Daten gesendet (${fmtDate(Date.now())})`, tree: tree.sha, parents: [st.head] } });
+        const c = await gh(`/repos/${st.R}/git/commits`, { method: 'POST', body: { message: `basementBOX – ${deviceName()}: Daten gesendet (${fmtDate(Date.now())})`, tree: tree.sha, parents: [st.head] } });
         await gh(`/repos/${st.R}/git/refs/heads/${encodeURIComponent(st.br)}`, { method: 'PATCH', body: { sha: c.sha }, conflict: true });
         break;
       } catch (e) {
@@ -987,7 +987,7 @@ async function syncFetch(force = false) {
   try {
     const st = await syncState();
     const sha = st.files[DATA_PATH];
-    if (!sha) { toast('Auf GitHub liegen noch keine Basement-Box-Daten. Am PC zuerst „Senden“.', { timeout: 7000 }); return; }
+    if (!sha) { toast('Auf GitHub liegen noch keine basementBOX-Daten. Am PC zuerst „Senden“.', { timeout: 7000 }); return; }
     const raw = await gh(`/repos/${st.R}/git/blobs/${sha}`);
     const d = JSON.parse(new TextDecoder().decode(await b64ToBlob(raw.content, 'application/json').arrayBuffer()));
     if (!d || d.app !== 'basementbox') throw new SyncError('Die Daten auf GitHub sind nicht lesbar.');
@@ -1029,7 +1029,7 @@ function syncSetupHtml() {
   try { fl = JSON.parse(localStorage.getItem('aofl_sync') || 'null'); } catch (e) { fl = null; }
   const canTake = fl && fl.repo && fl.token && !(s.repo && s.token);
   return `${modalHead('Abgleich über GitHub')}
-    <p class="small muted">Basement Box legt seine Daten in einem <b>privaten</b> Repository im eigenen Ordner <b>basementbox/</b> ab. Am einfachsten nimmst du dasselbe wie fitlog (fitlog-daten). fitlog liest diesen Ordner nicht, beide Apps stören sich nicht.</p>
+    <p class="small muted"><span class="bbx"><b>basement</b>BOX</span> legt seine Daten in einem <b>privaten</b> Repository im eigenen Ordner <b>basementbox/</b> ab. Am einfachsten nimmst du dasselbe wie fitlog (fitlog-daten). fitlog liest diesen Ordner nicht, beide Apps stören sich nicht.</p>
     ${canTake ? `<div class="callout">Auf diesem Gerät ist fitlog schon verbunden (${esc(fl.repo)}). <button class="btn sm" data-a="sync-take">Zugang von fitlog übernehmen</button></div>` : ''}
     <div class="field" style="margin-top:12px"><label for="syRepo">Repository (Benutzername/Name)</label>
       <input type="text" id="syRepo" value="${esc(s.repo || '')}" placeholder="walterhansi/fitlog-daten" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
@@ -1107,7 +1107,7 @@ function exListHtml(list) {
     const used = exUsedIn(e.id).length;
     return `<div class="card tight"><div class="card-row">${thumb(e)}<div class="grow"><div class="card-title">${esc(e.name)}</div>
       <div class="badges"><span class="badge id">ID ${esc(e.id)}</span>${used ? `<span class="badge">in ${used} Workout${used > 1 ? 's' : ''}</span>` : ''}</div></div>
-      ${isPC() && !used ? `<button class="icon-btn" data-a="ex-del" data-id="${esc(e.id)}" title="Aus Basement Box entfernen" aria-label="Entfernen">${ic('trash')}</button>` : ''}</div></div>`;
+      ${isPC() && !used ? `<button class="icon-btn" data-a="ex-del" data-id="${esc(e.id)}" title="Aus basementBOX entfernen" aria-label="Entfernen">${ic('trash')}</button>` : ''}</div></div>`;
   }).join('') + '</div>';
 }
 function viewMusic() {
@@ -1155,7 +1155,7 @@ function viewData() {
       <div class="card-actions"><button class="btn sm ghost" data-a="sync-setup" ${busy ? 'disabled' : ''}>Einstellungen</button></div></div>`;
   }
   h += `<div class="card"><h3>Speicher</h3><p class="small muted" style="margin-top:6px">${S.workouts.length} Workouts · ${Object.keys(S.exercises).length} Übungen · ${Object.keys(S.sounds).length} MP3s</p><p class="small muted" id="quota"></p></div>`;
-  h += `<div class="card"><h3>Hilfe</h3><p class="small muted" style="margin-top:6px">Basement Box Version ${APP_VERSION}. Es wird nichts protokolliert – das Festhalten deiner Ergebnisse bleibt bei fitlog.</p></div></div>`;
+  h += `<div class="card"><h3>Hilfe</h3><p class="small muted" style="margin-top:6px"><span class="bbx"><b>basement</b>BOX</span> Version ${APP_VERSION}. Es wird nichts protokolliert – das Festhalten deiner Ergebnisse bleibt bei fitlog.</p></div></div>`;
   setTimeout(showQuota, 0);
   return h;
 }
@@ -1192,7 +1192,7 @@ function viewEditor() {
         return;
       }
       const ex = S.exercises[it.exId];
-      h += `<div class="item">${thumb(ex, 'sm')}<div class="it-main"><div class="it-name"><span class="badge id">ID ${esc(it.exId)}</span> ${ex ? esc(ex.name) : '<span style="color:var(--z5)">fehlt in Basement Box</span>'}</div>
+      h += `<div class="item">${thumb(ex, 'sm')}<div class="it-main"><div class="it-name"><span class="badge id">ID ${esc(it.exId)}</span> ${ex ? esc(ex.name) : '<span style="color:var(--z5)">fehlt in basementBOX</span>'}</div>
         <div class="it-fields">
           ${timed ? `<label>Übung s<input type="number" min="1" value="${it.work ?? ''}" placeholder="${w.work}" data-c="it-num" data-f="work" data-b="${bi}" data-i="${ii}"></label>
           <label>Pause s<input type="number" min="0" value="${it.rest ?? ''}" placeholder="${w.rest}" data-c="it-num" data-f="rest" data-b="${bi}" data-i="${ii}"></label>`
@@ -1228,7 +1228,7 @@ function edAddId(bi) {
   const inp = $('#addId' + bi); if (!inp) return;
   const id = obsNorm(inp.value);
   if (!id) { inp.focus(); return; }
-  if (!S.exercises[id]) { toast(`Keine Übung mit ID ${id} in Basement Box. Am PC „Aus Obsidian holen“.`, { error: true }); inp.select(); return; }
+  if (!S.exercises[id]) { toast(`Keine Übung mit ID ${id} in basementBOX. Am PC „Aus Obsidian holen“.`, { error: true }); inp.select(); return; }
   const b = ui.ed.blocks[bi];
   const prev = [...b.items].reverse().find((x) => x.t === 'ex');
   b.items.push({ t: 'ex', exId: id, sound: prev ? prev.sound || '' : '', restSound: prev ? prev.restSound || '' : '' });
@@ -1309,7 +1309,7 @@ const ACTIONS = {
   'ex-del': async (el) => {
     const id = el.dataset.id;
     if (exUsedIn(id).length) return;
-    if (!confirm(`Übung ID ${id} aus Basement Box entfernen? In Obsidian bleibt sie, und beim Holen kommt sie nicht wieder (unten unter „Gelöschte Übungen“ kannst du sie zurückholen).`)) return;
+    if (!confirm(`Übung ID ${id} aus basementBOX entfernen? In Obsidian bleibt sie, und beim Holen kommt sie nicht wieder (unten unter „Gelöschte Übungen“ kannst du sie zurückholen).`)) return;
     delete S.exercises[id]; S.deleted = S.deleted || {}; S.deleted[id] = Date.now();
     await save(); await mediaCleanup(); render();
   },

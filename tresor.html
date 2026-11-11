@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Obsidian-Tresor umstellen – Basement Box</title>
+<title>Obsidian-Tresor umstellen – basementBOX</title>
 <meta name="robots" content="noindex">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <style>
@@ -38,7 +38,7 @@
 <body>
 <main>
   <h1>Obsidian-Tresor umstellen</h1>
-  <p>Einmalige Umstellung für fitlog und Basement Box: Das Häkchen <b>fitlog_auswahl</b> heißt danach <b>Übungsauswahl</b>, und aus der ID <b>UE-1656</b> wird <b>1656</b>.</p>
+  <p>Einmalige Umstellung für fitlog und <b style="color:#f9a73b">basement</b><b>BOX</b>: Das Häkchen <b>fitlog_auswahl</b> heißt danach <b>Übungsauswahl</b>, und aus der ID <b>UE-1656</b> wird <b>1656</b>.</p>
 
   <div class="card" id="step1">
     <h2 style="margin-top:0">1. Vorbereiten</h2>
@@ -168,7 +168,7 @@ function showReport() {
     <tr><td>Eigenschaftstyp in Obsidian</td><td>${P.types ? '<b>wird umbenannt</b> (Kontrollkästchen bleibt Kontrollkästchen)' : 'nichts zu tun'}</td></tr></table>`;
   if (P.dupIds.length) h += `<div class="callout bad"><b>Doppelte IDs</b> – bitte nach der Umstellung in Obsidian prüfen:${list(P.dupIds)}</div>`;
   if (P.both.length) h += `<div class="callout warn"><b>Beide Häkchen vorhanden</b> – hier bleibt das alte Häkchen stehen, bitte von Hand entfernen:${list(P.both)}</div>`;
-  if (P.ueInNames.length) h += `<div class="callout warn"><b>„UE-…“ in Datei- oder Ordnernamen</b> (${P.ueInNames.length}) – werden <b>nicht</b> umbenannt, damit keine Verknüpfung abreißt. Das stört fitlog und Basement Box nicht.${list(P.ueInNames, 6)}</div>`;
+  if (P.ueInNames.length) h += `<div class="callout warn"><b>„UE-…“ in Datei- oder Ordnernamen</b> (${P.ueInNames.length}) – werden <b>nicht</b> umbenannt, damit keine Verknüpfung abreißt. Das stört fitlog und basementBOX nicht.${list(P.ueInNames, 6)}</div>`;
   if (P.ueInText.length) h += `<div class="callout warn"><b>„UE-…“ im Notiztext</b> (${P.ueInText.length} Notizen) – bleibt unverändert, ist nur zur Info.${list(P.ueInText, 6)}</div>`;
   if (nothing) h += '<div class="callout"><span class="ok">Nichts zu tun</span> – der Tresor ist bereits umgestellt.</div>';
   else h += `<p style="margin-top:14px">Zuerst wird eine Sicherung von ${P.backup.length} Notiz- und Einstellungsdateien angelegt. Geändert wird danach nur der Kopfbereich (Eigenschaften) der Notizen. Text, Bilder und Dateinamen bleiben, wie sie sind.</p>

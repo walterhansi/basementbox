@@ -45,7 +45,10 @@ img { max-width: 100%; display: block; }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-icon { width: 34px; height: 34px; border-radius: 9px; }
 .brand-name { font-size: 1.15rem; }
+.brand-name { font-weight: 800; letter-spacing: .01em; }
 .brand-name b { color: var(--z4); font-weight: 800; }
+.bbx { font-weight: 700; white-space: nowrap; }
+.bbx b { color: var(--z4); }
 .ver { font-size: 0.8rem; color: var(--faint); }
 .view {
   position: fixed; top: var(--top); bottom: var(--navh); left: 0; right: 0;
