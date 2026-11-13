@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.9.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -90,7 +90,7 @@ const idbPut = (s, k, v) => idbReq(s, 'readwrite', (o) => o.put(v, k));
 const idbDel = (s, k) => idbReq(s, 'readwrite', (o) => o.delete(k));
 const idbKeys = (s) => idbReq(s, 'readonly', (o) => o.getAllKeys());
 
-function freshData() { return { app: 'basementbox', schema: 1, exercises: {}, sounds: {}, workouts: [], deleted: {}, imgTrim: 0, updatedAt: 0, dirty: false }; }
+function freshData() { return { app: 'basementbox', schema: 1, exercises: {}, sounds: {}, workouts: [], deleted: {}, restored: {}, deletedW: {}, deletedS: {}, imgTrim: 0, updatedAt: 0, dirty: false }; }
 let S = freshData();
 async function loadData() {
   try { const d = await idbGet('kv', 'data'); if (d && d.app === 'basementbox') S = Object.assign(freshData(), d); } catch (e) { toast('Gerätespeicher nicht lesbar: ' + e.message, { error: true, timeout: 10000 }); }
@@ -486,7 +486,7 @@ async function addSounds(files) {
     if (!key) { const ext = (f.name.match(/\.([a-z0-9]+)$/i) || [, 'mp3'])[1].toLowerCase(); key = `snd_${hash}.${ext}`; dur = await audioDuration(f); blob = new Blob([f], { type: f.type || 'audio/mpeg' }); }
     await idbPut('media', key, blob); mediaKeysHere.add(key);
     const id = uid();
-    S.sounds[id] = { id, name: f.name.replace(/\.[a-z0-9]+$/i, ''), media: key, src: hash, size: blob.size, origSize: f.size, dur, type: blob.type || 'audio/mpeg' };
+    S.sounds[id] = { id, name: f.name.replace(/\.[a-z0-9]+$/i, ''), media: key, src: hash, size: blob.size, origSize: f.size, dur, type: blob.type || 'audio/mpeg', updatedAt: Date.now() };
     saved += f.size - blob.size; n++;
   }
   await save();
@@ -925,6 +925,60 @@ async function ghBlob(R, blob) { return (await gh(`/repos/${R}/git/blobs`, { met
 function mediaType(key) { return /\.jpe?g$/i.test(key) ? 'image/jpeg' : /\.m4a$/i.test(key) ? 'audio/mp4' : /\.ogg$/i.test(key) ? 'audio/ogg' : /\.wav$/i.test(key) ? 'audio/wav' : 'audio/mpeg'; }
 function setBusy(t) { ui.busy = t; if (ui.tab === 'data') render(); }
 
+// Zwei Stände zusammenführen (wie fitlog): Neueres gewinnt, Gelöschtes kommt nicht wieder, nichts geht verloren.
+function mergeData(a, b) {
+  const t = (x) => (x && (x.updatedAt || x.createdAt)) || 0;
+  const maxMap = (x = {}, y = {}) => { const o = Object.assign({}, x); for (const [k, v] of Object.entries(y)) if (!(o[k] >= v)) o[k] = v; return o; };
+  const out = Object.assign(freshData(), a);
+  out.deletedW = maxMap(a.deletedW, b.deletedW);
+  out.deletedS = maxMap(a.deletedS, b.deletedS);
+  out.restored = maxMap(a.restored, b.restored);
+  out.deleted = maxMap(a.deleted, b.deleted);
+  for (const [id, ts] of Object.entries(out.restored)) if (out.deleted[id] && out.deleted[id] <= ts) delete out.deleted[id];
+  const rep = { ex: 0, wo: 0, snd: 0 };
+  // Übungen
+  out.exercises = Object.assign({}, a.exercises);
+  for (const [id, x] of Object.entries(b.exercises || {})) if (!out.exercises[id] || t(x) > t(out.exercises[id])) { out.exercises[id] = x; rep.ex++; }
+  for (const id of Object.keys(out.exercises)) if (out.deleted[id]) delete out.exercises[id];
+  // Musik
+  out.sounds = Object.assign({}, a.sounds);
+  for (const [id, x] of Object.entries(b.sounds || {})) if (!out.sounds[id] || t(x) > t(out.sounds[id])) { out.sounds[id] = x; rep.snd++; }
+  for (const [id, x] of Object.entries(out.sounds)) if (out.deletedS[id] && out.deletedS[id] >= t(x)) delete out.sounds[id];
+  // Workouts
+  const wo = new Map((a.workouts || []).map((w) => [w.id, w]));
+  for (const w of b.workouts || []) { const m = wo.get(w.id); if (!m || t(w) > t(m)) { wo.set(w.id, w); rep.wo++; } }
+  out.workouts = [...wo.values()].filter((w) => !(out.deletedW[w.id] && out.deletedW[w.id] >= t(w)));
+  out.imgTrim = Math.max(a.imgTrim || 0, b.imgTrim || 0);
+  out.updatedAt = Math.max(a.updatedAt || 0, b.updatedAt || 0);
+  return { data: out, rep };
+}
+// Stand von GitHub holen (mit Bildern und MP3s) und mit diesem Gerät zusammenführen
+async function pullMerge(st, sha) {
+  const raw = await gh(`/repos/${st.R}/git/blobs/${sha}`);
+  const d = JSON.parse(new TextDecoder().decode(await b64ToBlob(raw.content, 'application/json').arrayBuffer()));
+  if (!d || d.app !== 'basementbox') throw new SyncError('Die Daten auf GitHub sind nicht lesbar.');
+  const wasDirty = !!S.dirty;
+  const { data: nd, rep } = mergeData(S, Object.assign(freshData(), d));
+  const need = referencedMedia(nd);
+  const have = new Set(await idbKeys('media'));
+  const todo = [...need].filter((k) => !have.has(k));
+  let i = 0, missing = 0;
+  for (const k of todo) {
+    setBusy(`Dateien holen ${++i}/${todo.length} …`);
+    const fsha = st.files[MEDIA_DIR + k];
+    if (!fsha) { missing++; continue; }
+    const b = await gh(`/repos/${st.R}/git/blobs/${fsha}`);
+    await idbPut('media', k, b64ToBlob(b.content, mediaType(k)));
+  }
+  S = nd; S.dirty = wasDirty;
+  await save(false);
+  await mediaCleanup();
+  mediaKeysHere = new Set(await idbKeys('media'));
+  sync.dataSha = sha; sync.lastFetch = Date.now(); saveSync();
+  ui.news = false;
+  return { d, rep, missing };
+}
+
 async function syncSend(force = false) {
   if (!syncReady() || ui.busy) return;
   if (!deviceName()) { toast('Bitte zuerst unter „Dieses Gerät“ einen Gerätenamen eintragen.', { error: true }); ui.tab = 'data'; render(); return; }
@@ -933,11 +987,12 @@ async function syncSend(force = false) {
   try {
     let st = await syncState();
     const remote = st.files[DATA_PATH];
-    if (!force && remote && remote !== sync.dataSha) {
-      setBusy(null);
-      openModal(`${modalHead('Erst „Holen“?')}<div class="callout warn">Auf GitHub liegt ein Stand, den dieses Gerät noch nicht kennt (z. B. von einem anderen Gerät gesendet). Senden würde ihn ersetzen.</div>
-        <div class="modal-foot"><button class="btn ghost" data-a="modal-close">Abbrechen</button><button class="btn danger" data-a="sync-send-force">Trotzdem senden</button><button class="btn" data-a="sync-fetch">${ic('download')}Erst holen</button></div>`);
-      return;
+    if (remote && remote !== sync.dataSha) {
+      // Ein anderes Gerät hat inzwischen gesendet: erst dessen Stand übernehmen, dann alles zusammen senden.
+      setBusy('Erst holen …');
+      await pullMerge(st, remote);
+      setBusy('Senden …');
+      st = await syncState();
     }
     // 1. Fehlende Medien hochladen (Bilder, MP3s)
     const ref = referencedMedia(S, true);
@@ -975,42 +1030,17 @@ async function syncSend(force = false) {
   } catch (e) { toast(syncErrText(e), { error: true, timeout: 9000 }); }
   finally { setBusy(null); render(); }
 }
-async function syncFetch(force = false) {
+async function syncFetch() {
   if (!syncReady() || ui.busy) return;
   closeModal();
-  if (!force && S.dirty && Object.keys(S.exercises).length + S.workouts.length > 0) {
-    openModal(`${modalHead('Änderungen auf diesem Gerät')}<div class="callout warn">Hier gibt es Änderungen, die noch nicht gesendet wurden. Holen ersetzt sie durch den Stand auf GitHub.</div>
-      <div class="modal-foot"><button class="btn ghost" data-a="modal-close">Abbrechen</button><button class="btn danger" data-a="sync-fetch-force">Trotzdem holen</button>${isPC() ? `<button class="btn" data-a="sync-send">${ic('upload')}Erst senden</button>` : ''}</div>`);
-    return;
-  }
   setBusy('Holen …');
   try {
     const st = await syncState();
     const sha = st.files[DATA_PATH];
     if (!sha) { toast('Auf GitHub liegen noch keine basementBOX-Daten. Am PC zuerst „Senden“.', { timeout: 7000 }); return; }
-    const raw = await gh(`/repos/${st.R}/git/blobs/${sha}`);
-    const d = JSON.parse(new TextDecoder().decode(await b64ToBlob(raw.content, 'application/json').arrayBuffer()));
-    if (!d || d.app !== 'basementbox') throw new SyncError('Die Daten auf GitHub sind nicht lesbar.');
-    const nd = Object.assign(freshData(), d);
-    const need = referencedMedia(nd);
-    const have = new Set(await idbKeys('media'));
-    const todo = [...need].filter((k) => !have.has(k));
-    let i = 0, missing = 0;
-    for (const k of todo) {
-      setBusy(`Dateien holen ${++i}/${todo.length} …`);
-      const fsha = st.files[MEDIA_DIR + k];
-      if (!fsha) { missing++; continue; }
-      const b = await gh(`/repos/${st.R}/git/blobs/${fsha}`);
-      await idbPut('media', k, b64ToBlob(b.content, mediaType(k)));
-    }
+    const { d, rep, missing } = await pullMerge(st, sha);
     const from = d.device ? ` von ${d.device}` : '', when = d.sentAt ? ` (gesendet ${fmtDate(d.sentAt)})` : '';
-    S = nd; S.dirty = false;
-    await save(false);
-    await mediaCleanup();
-    mediaKeysHere = new Set(await idbKeys('media'));
-    sync.dataSha = sha; sync.lastFetch = Date.now(); saveSync();
-    ui.news = false;
-    toast(`Geholt${from}${when}: ${S.workouts.length} Workouts, ${Object.keys(S.exercises).length} Übungen, ${Object.keys(S.sounds).length} MP3s.${missing ? ` ${missing} Datei(en) fehlten.` : ''}`, { timeout: 6000 });
+    toast(`Geholt${from}${when} und zusammengeführt – neu oder geändert: ${rep.wo} Workouts, ${rep.ex} Übungen, ${rep.snd} MP3s. Auf diesem Gerät wurde nichts überschrieben.${missing ? ` ${missing} Datei(en) fehlten.` : ''}`, { timeout: 7000 });
   } catch (e) { toast(syncErrText(e), { error: true, timeout: 9000 }); }
   finally { setBusy(null); render(); }
 }
@@ -1269,7 +1299,7 @@ const ACTIONS = {
   'wo-del': async (el) => {
     const w = S.workouts.find((x) => x.id === el.dataset.id); if (!w) return;
     if (!confirm(`Workout „${w.name || 'Ohne Namen'}“ löschen?`)) return;
-    S.workouts = S.workouts.filter((x) => x !== w); await save(); render();
+    S.workouts = S.workouts.filter((x) => x !== w); S.deletedW[w.id] = Date.now(); await save(); render();
   },
   'wo-start': (el) => startDialog(el.dataset.id),
   ann: (el) => { localStorage.setItem('bb_ann', el.dataset.k); $$('#annSeg button').forEach((b) => b.classList.toggle('on', b === el)); },
@@ -1310,24 +1340,22 @@ const ACTIONS = {
     const id = el.dataset.id;
     if (exUsedIn(id).length) return;
     if (!confirm(`Übung ID ${id} aus basementBOX entfernen? In Obsidian bleibt sie, und beim Holen kommt sie nicht wieder (unten unter „Gelöschte Übungen“ kannst du sie zurückholen).`)) return;
-    delete S.exercises[id]; S.deleted = S.deleted || {}; S.deleted[id] = Date.now();
+    delete S.exercises[id]; S.deleted = S.deleted || {}; S.deleted[id] = Date.now(); delete S.restored[id];
     await save(); await mediaCleanup(); render();
   },
-  'ex-undel': async (el) => { delete S.deleted[el.dataset.id]; await save(); render(); toast(`ID ${el.dataset.id} kommt beim nächsten „Aus Obsidian holen“ wieder.`); },
+  'ex-undel': async (el) => { delete S.deleted[el.dataset.id]; S.restored[el.dataset.id] = Date.now(); await save(); render(); toast(`ID ${el.dataset.id} kommt beim nächsten „Aus Obsidian holen“ wieder.`); },
   // Musik
   'snd-play': (el) => previewSound(el.dataset.id),
   'snd-shrink': () => shrinkExisting(),
-  'snd-del': async (el) => { const s = S.sounds[el.dataset.id]; if (!s || !confirm(`„${s.name}“ löschen?`)) return; delete S.sounds[s.id]; await save(); await mediaCleanup(); render(); },
-  'snd-ren': async (el) => { const s = S.sounds[el.dataset.id]; if (!s) return; const n = prompt('Neuer Name', s.name); if (n == null || !n.trim()) return; s.name = n.trim(); await save(); render(); },
+  'snd-del': async (el) => { const s = S.sounds[el.dataset.id]; if (!s || !confirm(`„${s.name}“ löschen?`)) return; delete S.sounds[s.id]; S.deletedS[s.id] = Date.now(); await save(); await mediaCleanup(); render(); },
+  'snd-ren': async (el) => { const s = S.sounds[el.dataset.id]; if (!s) return; const n = prompt('Neuer Name', s.name); if (n == null || !n.trim()) return; s.name = n.trim(); s.updatedAt = Date.now(); await save(); render(); },
   // Abgleich
   'sync-setup': () => openModal(syncSetupHtml()),
   'sync-save': () => syncSaveSetup(),
   'sync-take': () => { try { const fl = JSON.parse(localStorage.getItem('aofl_sync')); $('#syRepo').value = fl.repo; $('#syToken').value = fl.token; } catch (e) { /* egal */ } },
   'sync-off': () => { if (!confirm('Abgleich auf diesem Gerät trennen? Die Daten hier bleiben.')) return; sync = null; saveSync(); closeModal(); render(); },
   'sync-send': () => syncSend(false),
-  'sync-send-force': () => syncSend(true),
   'sync-fetch': () => syncFetch(false),
-  'sync-fetch-force': () => syncFetch(true),
   'update-now': () => { if (swWaiting) swWaiting.postMessage('skipWaiting'); else location.reload(); }
 };
 const CHANGES = {
