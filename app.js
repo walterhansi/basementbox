@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.9.1';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -1418,7 +1418,7 @@ if (window.speechSynthesis) { pickVoice(); speechSynthesis.onvoiceschanged = pic
 
 let swWaiting = null;
 function showUpdate() {
-  $('#banner-root').innerHTML = `<div class="banner"><span>Neue Version verfügbar</span><button class="btn sm" data-a="update-now">Neu laden</button></div>`;
+  $('#banner-root').innerHTML = `<div class="banner"><span>Neue Version verfügbar</span><button class="btn sm" data-a="update-now">Aktualisieren</button></div>`;
 }
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').then((reg) => {
