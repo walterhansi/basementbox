@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '1.10.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -113,8 +113,13 @@ async function mediaUrl(key) {
 }
 // Welche Dateien dieses Gerät braucht. Am PC die ganze Musik-Sammlung, auf Handy/Chromebook nur Stücke aus Workouts.
 function usedSoundIds(data = S) {
-  const ids = new Set();
-  for (const w of data.workouts || []) for (const b of w.blocks) for (const it of b.items) { if (it.sound) ids.add(it.sound); if (it.restSound) ids.add(it.restSound); }
+  const ids = new Set(), dirs = new Set();
+  for (const w of data.workouts || []) for (const b of w.blocks) {
+    if (b.dirSound) dirs.add(b.dirSound); if (b.dirRest) dirs.add(b.dirRest);
+    for (const it of b.items) { if (it.sound) ids.add(it.sound); if (it.restSound) ids.add(it.restSound); }
+  }
+  // Musik-Ordner, die ein Abschnitt verwendet: alle Stücke daraus werden gebraucht
+  if (dirs.size) for (const s of Object.values(data.sounds || {})) if ((s.folders || []).some((f) => dirs.has(f))) ids.add(s.id);
   return ids;
 }
 function referencedMedia(data = S, all = isPC()) {
@@ -469,16 +474,25 @@ async function shrinkSound(blob) {
   const { pcm, dur } = await decodeMono(blob);
   return { blob: await encodeOpus(pcm), dur: Math.round(dur) };
 }
-async function addSounds(files) {
+// folder = Name eines Musik-Ordners: Die Stücke werden diesem Ordner zugeordnet (ein Stück kann in mehreren Ordnern sein).
+// Wird derselbe Ordner erneut gewählt, gilt danach genau der neue Inhalt.
+async function addSounds(files, folder = '') {
   let n = 0, saved = 0, failed = [];
   const shrink = canShrink();
-  openModal(`${modalHead('Musik laden')}<p class="muted" id="sndBusy">Lade …</p>`);
+  const inDir = new Set();
+  files = files.filter((f) => /^audio\//.test(f.type) || /\.(mp3|m4a|aac|ogg|opus|wav|flac)$/i.test(f.name));
+  if (folder && !files.length) { toast(`Im Ordner „${folder}“ liegen keine Musikdateien.`, { error: true, timeout: 6000 }); return; }
+  openModal(`${modalHead(folder ? `Musik-Ordner „${esc(folder)}“ laden` : 'Musik laden')}<p class="muted" id="sndBusy">Lade …</p>`, { sticky: true });
+  let k = 0;
   for (const f of files) {
-    if (!/^audio\//.test(f.type) && !/\.(mp3|m4a|aac|ogg|opus|wav|flac)$/i.test(f.name)) continue;
-    const b = $('#sndBusy'); if (b) b.textContent = `${shrink ? 'Verkleinere' : 'Lade'} ${f.name} …`;
+    const b = $('#sndBusy'); if (b) b.textContent = `${++k}/${files.length}: ${shrink ? 'Verkleinere' : 'Lade'} ${f.name} …`;
     const hash = (await sha256hex(f)).slice(0, 20);
     // Gleiche Originaldatei nur einmal – egal ob verkleinert oder nicht
-    if (Object.values(S.sounds).some((s) => s.src === hash || (s.media || '').startsWith(`snd_${hash}.`))) continue;
+    const old = Object.values(S.sounds).find((s) => s.src === hash || (s.media || '').startsWith(`snd_${hash}.`));
+    if (old) {
+      if (folder) { inDir.add(old.id); if (!(old.folders || []).includes(folder)) { old.folders = [...(old.folders || []), folder]; old.updatedAt = Date.now(); } }
+      continue;
+    }
     let blob = f, dur = 0, key;
     if (shrink) {
       try { const r = await shrinkSound(f); blob = r.blob; dur = r.dur; key = `snd_${hash}.ogg`; } catch (e) { failed.push(f.name); blob = f; }
@@ -487,11 +501,29 @@ async function addSounds(files) {
     await idbPut('media', key, blob); mediaKeysHere.add(key);
     const id = uid();
     S.sounds[id] = { id, name: f.name.replace(/\.[a-z0-9]+$/i, ''), media: key, src: hash, size: blob.size, origSize: f.size, dur, type: blob.type || 'audio/mpeg', updatedAt: Date.now() };
+    if (folder) { S.sounds[id].folders = [folder]; inDir.add(id); }
     saved += f.size - blob.size; n++;
   }
+  let gone = 0;
+  if (folder) for (const s of Object.values(S.sounds)) if ((s.folders || []).includes(folder) && !inDir.has(s.id)) { s.folders = s.folders.filter((x) => x !== folder); s.updatedAt = Date.now(); gone++; }
   await save();
   closeModal(); render();
-  toast(n ? `${n} Stück(e) geladen${saved > 1048576 ? `, ${(saved / 1048576).toFixed(1)} MB gespart` : ''}.${failed.length ? ` Nicht verkleinert: ${failed.join(', ')}` : ''}` : 'Keine neuen Musikdateien.', { timeout: 6000 });
+  const extra = `${saved > 1048576 ? `, ${(saved / 1048576).toFixed(1)} MB gespart` : ''}.${failed.length ? ` Nicht verkleinert: ${failed.join(', ')}` : ''}`;
+  if (folder) toast(`Ordner „${folder}“: ${inDir.size} Stück(e), davon ${n} neu${extra}${gone ? ` ${gone} nicht mehr im Ordner.` : ''}`, { timeout: 7000 });
+  else toast(n ? `${n} Stück(e) geladen${extra}` : 'Keine neuen Musikdateien.', { timeout: 6000 });
+}
+// Musik-Ordner: Stücke in Reihenfolge des Namens (1, 2, … 10 richtig sortiert)
+function dirSounds(name, data = S) {
+  return Object.values(data.sounds || {}).filter((s) => (s.folders || []).includes(name)).sort((a, b) => a.name.localeCompare(b.name, 'de', { numeric: true }));
+}
+function soundDirs() {
+  const set = new Set();
+  for (const s of Object.values(S.sounds)) for (const f of s.folders || []) set.add(f);
+  return [...set].sort((a, b) => a.localeCompare(b, 'de', { numeric: true }));
+}
+function dirUsedIn(name) { return S.workouts.filter((w) => w.blocks.some((b) => b.dirSound === name || b.dirRest === name)); }
+function dirOptions(sel, prefix) {
+  return `<option value="">${prefix}: kein Ordner</option>` + soundDirs().map((d) => `<option value="${esc(d)}" ${d === sel ? 'selected' : ''}>${prefix}: Ordner ${esc(d)} (${dirSounds(d).length})</option>`).join('');
 }
 // Früher geladene, unverkleinerte Stücke nachträglich verkleinern
 async function shrinkExisting() {
@@ -556,11 +588,12 @@ function buildSteps(w) {
         if (it.t !== 'ex') continue;
         const ex = S.exercises[it.exId] || { id: it.exId, name: `Übung ${it.exId} (fehlt)`, cue: '', img: null };
         const work = timed ? Math.max(1, it.work != null && it.work !== '' ? num(it.work) : w.work) : null;
-        steps.push({ kind: 'work', ex, it, dur: work, sound: it.sound || '', target: String(it.reps || '').trim(), note, noteNew: fresh, block: b, bi, round: r, rounds: R });
+        // Musik: eigenes Stück der Übung, sonst der Musik-Ordner des Abschnitts („dir:Name“)
+        steps.push({ kind: 'work', ex, it, dur: work, sound: it.sound || (b.dirSound ? 'dir:' + b.dirSound : ''), target: String(it.reps || '').trim(), note, noteNew: fresh, block: b, bi, round: r, rounds: R });
         fresh = false;
         if (timed) {
           const rest = it.rest != null && it.rest !== '' ? num(it.rest) : w.rest;
-          if (rest > 0) steps.push({ kind: 'rest', dur: rest, sound: it.restSound || '', block: b, bi, round: r, rounds: R });
+          if (rest > 0) steps.push({ kind: 'rest', dur: rest, sound: it.restSound || (b.dirRest ? 'dir:' + b.dirRest : ''), block: b, bi, round: r, rounds: R });
         }
       }
     }
@@ -579,12 +612,30 @@ function workoutDuration(w) {
 function exCount(w) { return buildSteps(w).filter((s) => s.kind === 'work').length; }
 
 /* ================= 6 Spieler ================= */
-const AE = { ctx: null, el: null, gain: null, cur: '', level: 0.9, music: true, duck: false, fadeTimer: null };
+// AE.cur = Stück-ID oder „dir:Ordnername“. AE.radio merkt sich je Ordner Stück und Stelle,
+// damit der Ordner wie ein Radio weiterläuft und nach anderer Musik dort weitermacht, wo er aufgehört hat.
+const AE = { ctx: null, el: null, gain: null, cur: '', level: 0.9, music: true, duck: false, fadeTimer: null, radio: {} };
+function aeDir() { return AE.cur.startsWith('dir:') ? AE.cur.slice(4) : null; }
+function dirHere(name) { return dirSounds(name).filter((s) => mediaKeysHere.has(s.media)); }
+function radioKeep() { const d = aeDir(); if (d && AE.radio[d] && AE.el) AE.radio[d].t = AE.el.currentTime || 0; }
+// Stück zu Ende: nächstes Stück aus dem Ordner (nach dem letzten wieder das erste)
+async function radioNext() {
+  const d = aeDir(); if (!d) return;
+  const list = dirHere(d); if (!list.length) return;
+  const p = AE.radio[d];
+  const s = list[(list.findIndex((x) => x.id === p.id) + 1) % list.length];
+  p.id = s.id; p.t = 0;
+  const key = AE.cur, u = await mediaUrl(s.media);
+  if (!u || AE.cur !== key) return;
+  AE.el.src = u; AE.el.currentTime = 0;
+  if (!(P && P.paused)) AE.el.play().catch(() => {});
+}
 function aeInit() {
   if (AE.ctx) { if (AE.ctx.state === 'suspended') AE.ctx.resume(); return; }
   const C = window.AudioContext || window.webkitAudioContext;
   AE.ctx = new C();
   AE.el = new Audio(); AE.el.loop = true;
+  AE.el.addEventListener('ended', radioNext);
   const src = AE.ctx.createMediaElementSource(AE.el);
   AE.gain = AE.ctx.createGain(); AE.gain.gain.value = 0;
   src.connect(AE.gain).connect(AE.ctx.destination);
@@ -598,19 +649,33 @@ function aeRamp(to, sec) {
 async function musicPlay(soundId) {
   if (!AE.ctx) return;
   clearTimeout(AE.fadeTimer);
-  const s = soundId && S.sounds[soundId];
+  soundId = soundId || '';
+  if (soundId && AE.cur === soundId && AE.el.src) { if (AE.el.paused) AE.el.play().catch(() => {}); aeRamp(aeTarget(), 0.3); return; }
+  const dir = soundId.startsWith('dir:') ? soundId.slice(4) : null;
+  let s = null, at = 0;
+  if (dir) {
+    const list = dirHere(dir);
+    if (list.length) {
+      const p = AE.radio[dir] || (AE.radio[dir] = { id: list[0].id, t: 0 });
+      s = list.find((x) => x.id === p.id) || list[0];
+      if (s.id !== p.id) { p.id = s.id; p.t = 0; }
+      at = p.t;
+    }
+  } else s = soundId && S.sounds[soundId];
   if (!s) { musicStop(0.4); return; }
-  if (AE.cur === soundId && AE.el.src) { if (AE.el.paused) AE.el.play().catch(() => {}); aeRamp(aeTarget(), 0.3); return; }
+  radioKeep();
   AE.cur = soundId;
   const u = await mediaUrl(s.media);
   if (!u || AE.cur !== soundId) return;
   AE.gain.gain.value = 0;
-  AE.el.src = u; AE.el.currentTime = 0;
+  AE.el.loop = !dir; // eigenes Stück wiederholt sich, Ordner geht zum nächsten Stück
+  AE.el.src = u; AE.el.currentTime = at;
   try { await AE.el.play(); } catch (e) { /* Wiedergabe blockiert */ }
   aeRamp(aeTarget(), 0.4);
 }
 function musicStop(fade = 1) {
   if (!AE.ctx) return;
+  radioKeep();
   AE.cur = '';
   aeRamp(0, fade);
   clearTimeout(AE.fadeTimer);
@@ -654,6 +719,12 @@ function startDialog(id, trial = false) {
   const speed = +(localStorage.getItem('bb_trial_speed') || 1);
   const last = localStorage.getItem('bb_ann') || 'both';
   const missing = [];
+  for (const b of w.blocks) for (const d of [b.dirSound, b.dirRest]) {
+    if (!d) continue;
+    const all = dirSounds(d), here = dirHere(d);
+    if (!all.length) missing.push(`Musik-Ordner „${d}“ ist leer`);
+    else if (here.length < all.length) missing.push(`Aus dem Musik-Ordner „${d}“ fehlen ${all.length - here.length} Stück(e) auf diesem Gerät`);
+  }
   for (const b of w.blocks) for (const it of b.items) {
     if (it.t === 'ex' && !S.exercises[it.exId]) missing.push(`Übung ${it.exId} fehlt`);
     for (const k of ['sound', 'restSound']) if (it[k] && (!S.sounds[it[k]] || !mediaKeysHere.has(S.sounds[it[k]].media))) missing.push('Ein Musikstück fehlt auf diesem Gerät');
@@ -677,6 +748,7 @@ function playStart(w, trial = false) {
   const ann = localStorage.getItem('bb_ann') || 'both';
   closeModal();
   aeInit(); pickVoice();
+  AE.radio = {}; // Musik-Ordner beginnen bei jedem Workout mit dem ersten Stück
   P = { w, steps, i: 0, t0: performance.now(), acc: 0, paused: false, sig: ann === 'sig' || ann === 'both', voice: (ann === 'voice' || ann === 'both') && speed === 1, lastBeep: null, startedAt: Date.now(), timer: null, fading: false, trial, speed };
   wakeOn();
   enterStep(0);
@@ -1146,11 +1218,24 @@ function viewMusic() {
   const list = Object.values(S.sounds).filter((x) => pc || used.has(x.id)).sort((a, b) => a.name.localeCompare(b.name, 'de'));
   const big = Object.values(S.sounds).filter((x) => !/\.ogg$/.test(x.media || ''));
   const total = list.reduce((a, x) => a + (mediaKeysHere.has(x.media) ? x.size || 0 : 0), 0);
-  let h = `<div class="view-inner"><div class="page-head"><h1>Musik</h1>${pc ? `<label class="btn">${ic('plus')}Musik hinzufügen<input type="file" accept="audio/*,.mp3,.m4a,.ogg,.wav,.flac" multiple hidden data-c="snd-files"></label>` : ''}</div>
+  let h = `<div class="view-inner"><div class="page-head"><h1>Musik</h1>${pc ? `<div class="btn-row"><label class="btn ghost">${ic('list')}Ordner hinzufügen<input type="file" webkitdirectory multiple hidden data-c="snd-dir"></label><label class="btn">${ic('plus')}Musik hinzufügen<input type="file" accept="audio/*,.mp3,.m4a,.ogg,.wav,.flac" multiple hidden data-c="snd-files"></label></div>` : ''}</div>
     <p class="hint" style="margin:-6px 0 12px">${pc
       ? 'Deine eigenen Musikdateien. Beim Hinzufügen werden sie platzsparend gespeichert: Mono, höchstens 3 Minuten. Deine Originaldateien bleiben unverändert. Im Workout ordnest du jeder Übung und jeder Pause ein Stück zu; ist es kürzer als die Phase, wiederholt es sich.'
       : 'Auf diesem Gerät liegen nur die Stücke, die in deinen Workouts vorkommen.'} Belegt: ${(total / 1048576).toFixed(1)} MB.</p>`;
   if (pc && big.length && canShrink()) h += `<div class="callout warn">${big.length} Stück(e) sind noch in voller Größe gespeichert. <button class="btn sm" data-a="snd-shrink" style="margin-left:8px">Jetzt verkleinern</button></div>`;
+  const dirs = soundDirs().filter((d) => pc || dirSounds(d).some((x) => used.has(x.id)));
+  if (dirs.length || pc) {
+    h += `<div class="section-title">Musik-Ordner</div>
+      <p class="hint" style="margin:-4px 0 10px">${pc ? 'Einen Ordner von deinem PC wählen: Alle Stücke darin kommen hierher und gehören zusammen. Im Workout kannst du pro Abschnitt einen Ordner wählen. Er spielt der Reihe nach (nach Namen sortiert) bei allen Übungen bzw. Pausen, die kein eigenes Stück haben. Liegen später andere Stücke im Ordner, wähle ihn einfach noch einmal.' : 'Musik-Ordner aus deinen Workouts.'}</p>`;
+    if (!dirs.length) h += '<div class="empty" style="padding:14px">Noch kein Musik-Ordner. „Ordner hinzufügen“ tippen.</div>';
+    h += '<div class="grid cols">' + dirs.map((d) => {
+      const ls = dirSounds(d), n = dirUsedIn(d).length, dur = ls.reduce((a, x) => a + (x.dur || 0), 0);
+      return `<div class="card tight"><div class="card-row"><div class="thumb ph sm">${ic('list')}</div>
+        <div class="grow"><div class="card-title">${esc(d)}</div><div class="card-sub">${ls.length} Stück(e)${dur ? ' · ' + durText(dur) : ''}${n ? ` · in ${n} Workout${n > 1 ? 's' : ''}` : ''}</div>
+        <div class="card-sub">${ls.map((x, i) => `${i + 1}. ${esc(x.name)}`).join(' · ')}</div></div>
+        ${pc && !n ? `<button class="icon-btn" data-a="dir-del" data-d="${esc(d)}" title="Ordner auflösen (Stücke bleiben)" aria-label="Ordner auflösen">${ic('trash')}</button>` : ''}</div></div>`;
+    }).join('') + '</div><div class="section-title">Alle Stücke</div>';
+  }
   if (!list.length) h += `<div class="empty">Noch keine Musik.${pc ? ' „Musik hinzufügen“ tippen.' : ' Am PC hinzufügen und in einem Workout verwenden, dann hier „Holen“.'}</div>`;
   h += '<div class="grid cols">' + list.map((x) => {
     const n = soundUsedIn(x.id).length;
@@ -1159,7 +1244,7 @@ function viewMusic() {
     const mb = (v) => v >= 1048576 ? (v / 1048576).toFixed(1).replace('.', ',') + ' MB' : Math.max(1, Math.round(v / 1024)) + ' KB';
     const sz = `${mb(x.size || 0)}${x.origSize && x.origSize > x.size ? ` statt ${mb(x.origSize)}` : ''}`;
     return `<div class="card tight"><div class="card-row"><button class="icon-btn" data-a="snd-play" data-id="${x.id}" aria-label="Anhören" ${here ? '' : 'disabled'}>${ic(playing ? 'pause' : 'play')}</button>
-      <div class="grow"><div class="card-title">${esc(x.name)}</div><div class="card-sub">${x.dur ? mmss(x.dur) + ' · ' : ''}${sz}${n ? ` · in ${n} Workout${n > 1 ? 's' : ''}` : ''}${here ? '' : ' · <span style="color:var(--z4)">fehlt – bitte „Holen“</span>'}</div></div>
+      <div class="grow"><div class="card-title">${esc(x.name)}</div><div class="card-sub">${x.dur ? mmss(x.dur) + ' · ' : ''}${sz}${n ? ` · in ${n} Workout${n > 1 ? 's' : ''}` : ''}${(x.folders || []).length ? ` · Ordner: ${x.folders.map(esc).join(', ')}` : ''}${here ? '' : ' · <span style="color:var(--z4)">fehlt – bitte „Holen“</span>'}</div></div>
       ${pc ? `<button class="icon-btn" data-a="snd-ren" data-id="${x.id}" title="Umbenennen" aria-label="Umbenennen">${ic('edit')}</button>${n ? '' : `<button class="icon-btn" data-a="snd-del" data-id="${x.id}" title="Löschen" aria-label="Löschen">${ic('trash')}</button>`}` : ''}</div></div>`;
   }).join('') + '</div></div>';
   return h;
@@ -1227,8 +1312,8 @@ function viewEditor() {
           ${timed ? `<label>Übung s<input type="number" min="1" value="${it.work ?? ''}" placeholder="${w.work}" data-c="it-num" data-f="work" data-b="${bi}" data-i="${ii}"></label>
           <label>Pause s<input type="number" min="0" value="${it.rest ?? ''}" placeholder="${w.rest}" data-c="it-num" data-f="rest" data-b="${bi}" data-i="${ii}"></label>`
           : `<label>Vorgabe<input type="text" class="reps" value="${esc(it.reps || '')}" placeholder="z. B. 12 Wdh" data-in="it-reps" data-b="${bi}" data-i="${ii}"></label>`}
-          <label>Musik Übung<select data-c="it-snd" data-f="sound" data-b="${bi}" data-i="${ii}">${soundOptions(it.sound)}</select></label>
-          ${timed ? `<label>Musik Pause danach<select data-c="it-snd" data-f="restSound" data-b="${bi}" data-i="${ii}">${soundOptions(it.restSound)}</select></label>` : ''}
+          <label>Musik Übung<select data-c="it-snd" data-f="sound" data-b="${bi}" data-i="${ii}">${soundOptions(it.sound, b.dirSound ? `– Ordner ${esc(b.dirSound)} –` : undefined)}</select></label>
+          ${timed ? `<label>Musik Pause danach<select data-c="it-snd" data-f="restSound" data-b="${bi}" data-i="${ii}">${soundOptions(it.restSound, b.dirRest ? `– Ordner ${esc(b.dirRest)} –` : undefined)}</select></label>` : ''}
         </div></div>${tools}</div>`;
     });
     h += `<div class="addrow"><input type="text" inputmode="numeric" placeholder="Übungs-ID" data-k="add-id" data-in="add-id-in" data-b="${bi}" id="addId${bi}" autocomplete="off">
@@ -1239,6 +1324,11 @@ function viewEditor() {
       h += `<div class="block-tools"><span class="small muted">Für alle Übungen dieses Abschnitts:</span>
         <select data-c="bl-snd" data-f="sound" data-b="${bi}">${soundOptions('', 'Musik Übung setzen …')}</select>
         ${timed ? `<select data-c="bl-snd" data-f="restSound" data-b="${bi}">${soundOptions('', 'Musik Pause setzen …')}</select>` : ''}</div>`;
+      h += soundDirs().length || b.dirSound || b.dirRest
+        ? `<div class="block-tools"><span class="small muted">Wo keine Musik eingetragen ist, Ordner der Reihe nach:</span>
+        <select data-c="bl-dir" data-f="dirSound" data-b="${bi}" class="${b.dirSound ? 'on' : ''}">${dirOptions(b.dirSound, 'Übungen')}</select>
+        ${timed ? `<select data-c="bl-dir" data-f="dirRest" data-b="${bi}" class="${b.dirRest ? 'on' : ''}">${dirOptions(b.dirRest, 'Pausen')}</select>` : ''}</div>`
+        : '<div class="block-tools"><span class="small muted">Musik-Ordner, die der Reihe nach spielen, legst du unter „Musik“ › „Ordner hinzufügen“ an.</span></div>';
     }
     h += '</div>';
   });
@@ -1348,6 +1438,11 @@ const ACTIONS = {
   'snd-play': (el) => previewSound(el.dataset.id),
   'snd-shrink': () => shrinkExisting(),
   'snd-del': async (el) => { const s = S.sounds[el.dataset.id]; if (!s || !confirm(`„${s.name}“ löschen?`)) return; delete S.sounds[s.id]; S.deletedS[s.id] = Date.now(); await save(); await mediaCleanup(); render(); },
+  'dir-del': async (el) => {
+    const d = el.dataset.d; if (dirUsedIn(d).length || !confirm(`Musik-Ordner „${d}“ auflösen? Die Stücke bleiben unter „Alle Stücke“.`)) return;
+    for (const s of dirSounds(d)) { s.folders = s.folders.filter((x) => x !== d); s.updatedAt = Date.now(); }
+    await save(); render();
+  },
   'snd-ren': async (el) => { const s = S.sounds[el.dataset.id]; if (!s) return; const n = prompt('Neuer Name', s.name); if (n == null || !n.trim()) return; s.name = n.trim(); s.updatedAt = Date.now(); await save(); render(); },
   // Abgleich
   'sync-setup': () => openModal(syncSetupHtml()),
@@ -1366,7 +1461,13 @@ const CHANGES = {
   'bl-snd': (el) => { if (!el.value) return; for (const it of ui.ed.blocks[+el.dataset.b].items) if (it.t === 'ex') it[el.dataset.f] = el.value; edRefresh(); },
   'obs-dir': (el) => { const files = [...(el.files || [])]; el.value = ''; if (files.length) obsRun(obsTreeFromFiles(files)); },
   device: (el) => { localStorage.setItem('bb_device', el.value.trim()); },
-  'snd-files': (el) => { const files = [...(el.files || [])]; el.value = ''; if (files.length) addSounds(files); }
+  'snd-files': (el) => { const files = [...(el.files || [])]; el.value = ''; if (files.length) addSounds(files); },
+  'snd-dir': (el) => {
+    const files = [...(el.files || [])]; el.value = ''; if (!files.length) return;
+    const name = nfc((files[0].webkitRelativePath || '').split('/')[0] || 'Ordner');
+    addSounds(files.sort((a, b) => a.webkitRelativePath.localeCompare(b.webkitRelativePath, 'de', { numeric: true })), name);
+  },
+  'bl-dir': (el) => { const b = ui.ed.blocks[+el.dataset.b]; if (el.value) b[el.dataset.f] = el.value; else delete b[el.dataset.f]; edRefresh(); }
 };
 const INPUTS = {
   'ed-name': (el) => { ui.ed.name = el.value; },
