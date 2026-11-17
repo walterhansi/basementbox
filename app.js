@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -318,8 +318,127 @@ async function obsRun(root) {
     openModal(obsPreviewHtml(), { wide: true });
   } catch (e) { closeModal(); toast('Lesen fehlgeschlagen: ' + (e && e.message ? e.message : e), { error: true, timeout: 9000 }); }
 }
+// ---------- Workouts aus Obsidian (Ordner „Workouts“, Häkchen „basementbox“) ----------
+// Format: „## Titel (Runden: 2)“ = Abschnitt, „- 2448 | [[Name]] | 40 s / 10 s | Hinweis“ = Übung, „> Text“ = Hinweis ab hier.
+function obsWoTick(fm) { return Object.keys(fm).some((k) => norm(k) === 'basementbox' && fm[k] === true); }
+function obsSecs(v) { const m = String(v ?? '').match(/\d+(?:[.,]\d+)?/); return m ? num(m[0]) : null; }
+function obsWoParse(fm, body, fname) {
+  const errs = [];
+  const has = (v) => v != null && v !== '';
+  const w = {
+    name: String(fm.name || fname.replace(/\.md$/i, '')).trim(),
+    mode: /^tipp/i.test(String(fm.modus || '')) ? 'tap' : 'time',
+    work: has(fm.arbeit_s) ? Math.max(1, num(fm.arbeit_s)) : 40,
+    rest: has(fm.pause_s) ? Math.max(0, num(fm.pause_s)) : 20,
+    prep: has(fm.vorbereitung_s) ? Math.max(3, num(fm.vorbereitung_s)) : 10,
+    restAdvance: /^tipp/i.test(String(fm.nach_pause || '')) ? 'tap' : 'auto',
+    blocks: []
+  };
+  let b = null;
+  for (const raw of String(body).split('\n')) {
+    const h = raw.match(/^##\s+(.+?)\s*$/);
+    if (h) {
+      const m = h[1].match(/^(.*?)\s*\(\s*Runden\s*:?\s*(\d+)\s*\)\s*$/i);
+      b = { title: (m ? m[1] : h[1]).trim(), rounds: m ? Math.max(1, parseInt(m[2], 10)) : 1, items: [] };
+      w.blocks.push(b); continue;
+    }
+    if (!b) continue; // Kasten oben wird nicht übernommen
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith('>')) {
+      const t = obsClean(line.replace(/^>\s?/, ''));
+      if (t && !/^\[!/.test(t)) b.items.push({ t: 'text', text: t });
+      continue;
+    }
+    const li = line.match(/^[-*+]\s+(.*)$/);
+    if (!li) continue;
+    const cols = li[1].split('|').map((c) => c.trim());
+    const id = obsNorm(cols[0]);
+    if (!/^\d+$/.test(id)) { errs.push(`Zeile nicht lesbar: „${line}“`); continue; }
+    const it = { t: 'ex', exId: id };
+    const c3 = cols[2] || '';
+    if (w.mode === 'time') {
+      if (c3) {
+        const [a, p] = c3.split('/');
+        const wk = obsSecs(a), rs = obsSecs(p);
+        if (wk == null && rs == null) errs.push(`Zeit nicht lesbar: „${line}“`);
+        if (wk != null) it.work = Math.max(1, wk);
+        if (rs != null) it.rest = Math.max(0, rs);
+      }
+    } else if (c3) it.reps = c3;
+    const note = obsClean(cols.slice(3).join(' | '));
+    if (note) it.note = note;
+    b.items.push(it);
+  }
+  w.blocks = w.blocks.filter((x) => x.items.some((it) => it.t === 'ex'));
+  return { w, errs };
+}
+async function obsWoRead(root) {
+  const W = { list: [], add: [], upd: [], copy: [], warn: [], skip: [], same: 0, read: 0, need: new Map() };
+  const dir = await obsChild(root, 'Workouts', 'directory');
+  if (!dir) return W;
+  const notes = [];
+  for await (const [fname, h] of dir.entries()) if (h.kind === 'file' && /\.md$/i.test(fname)) notes.push([nfc(fname), h]);
+  notes.sort((a, b) => a[0].localeCompare(b[0], 'de'));
+  const seen = new Map();
+  for (const [fname, h] of notes) {
+    const text = await (await h.getFile()).text();
+    const [fm, body] = obsParse(text);
+    W.read++;
+    if (!obsWoTick(fm)) continue;
+    const wid = String(fm.workout_id ?? '').trim();
+    const label = `${String(fm.name || fname.replace(/\.md$/i, '')).trim()}${wid ? ' (' + wid + ')' : ''}`;
+    if (!wid) { W.skip.push(`${label}: keine workout_id`); continue; }
+    if (seen.has(wid)) { W.warn.push(`Workout-Nummer ${wid} kommt doppelt vor („${seen.get(wid)}“ und „${label}“) – zweite Notiz übersprungen`); continue; }
+    seen.set(wid, label);
+    const { w, errs } = obsWoParse(fm, body, fname);
+    for (const e of errs) W.warn.push(`${label}: ${e}`);
+    if (!w.blocks.length) { W.skip.push(`${label}: keine lesbaren Übungen`); continue; }
+    for (const b of w.blocks) for (const it of b.items) if (it.t === 'ex' && !W.need.has(it.exId)) W.need.set(it.exId, label);
+    const sig = (await sha256hex(new Blob([text]))).slice(0, 20);
+    W.list.push({ wid, appId: 'obs-' + wid, label, w, sig });
+  }
+  return W;
+}
+// Nach dem Lesen der Übungen: neu, aktualisieren, als Kopie oder unverändert
+function obsWoSort(W, P) {
+  for (const [id, label] of W.need) if (!P.found.has(id)) W.warn.push(`${label}: Übung ${id} fehlt in Obsidian oder ist in basementBOX gelöscht`);
+  for (const x of W.list) {
+    const old = S.workouts.find((o) => o.id === x.appId);
+    if (!old) {
+      if (S.deletedW && S.deletedW[x.appId]) W.skip.push(`${x.label}: in basementBOX gelöscht – kommt nicht wieder. Zum erneuten Übernehmen in Obsidian eine neue workout_id vergeben.`);
+      else W.add.push(x);
+      continue;
+    }
+    x.old = old;
+    if (old.obsSig === x.sig) { W.same++; continue; }
+    // In der App seit dem letzten Holen verändert? Dann als Kopie anlegen.
+    if ((old.updatedAt || 0) > (old.obsAt || 0)) W.copy.push(x); else W.upd.push(x);
+  }
+}
+// Workout-Objekt bauen. Musik (Stücke und Ordner) aus der alten Fassung bleibt an derselben Stelle erhalten.
+function obsWoMake(x, old, now) {
+  const w = JSON.parse(JSON.stringify(x.w));
+  Object.assign(w, { id: x.appId, src: 'obsidian', obsId: x.wid, obsSig: x.sig, obsAt: now, createdAt: old ? old.createdAt || now : now, updatedAt: now });
+  w.blocks.forEach((b, bi) => {
+    const ob = old && old.blocks[bi];
+    b.id = ob ? ob.id : uid();
+    if (ob && ob.dirSound) b.dirSound = ob.dirSound;
+    if (ob && ob.dirRest) b.dirRest = ob.dirRest;
+    const oldEx = ob ? ob.items.filter((z) => z.t === 'ex') : [];
+    let k = 0;
+    for (const it of b.items) {
+      if (it.t !== 'ex') continue;
+      const oi = oldEx[k++];
+      if (oi && oi.exId === it.exId) { if (oi.sound) it.sound = oi.sound; if (oi.restSound) it.restSound = oi.restSound; }
+    }
+  });
+  return w;
+}
+function obsUnlink(w) { delete w.src; delete w.obsId; delete w.obsSig; delete w.obsAt; return w; }
 async function obsPlan(root, dir) {
-  const P = { add: [], upd: [], warn: [], skip: [], read: 0, keepNoTick: 0 };
+  const P = { add: [], upd: [], warn: [], skip: [], read: 0, keepNoTick: 0, found: new Set() };
+  P.W = await obsWoRead(root);
   const notes = [];
   for await (const [fname, h] of dir.entries()) if (h.kind === 'file' && /\.md$/i.test(fname)) notes.push([nfc(fname), h]);
   notes.sort((a, b) => a[0].localeCompare(b[0], 'de'));
@@ -329,7 +448,8 @@ async function obsPlan(root, dir) {
     P.read++;
     if (P.read % 50 === 0) { const b = $('#obsBusy'); if (b) b.textContent = `Lese Übungen … ${P.read}`; }
     const id = obsNorm(fm.id);
-    const tick = obsTick(fm);
+    // Übungen, die ein Workout braucht, kommen auch ohne Häkchen mit
+    const tick = obsTick(fm) || P.W.need.has(id);
     const have = id && S.exercises[id];
     if (!have && !tick) continue;
     const name = String(fm.name || fname.replace(/\.md$/i, '')).trim();
@@ -338,6 +458,7 @@ async function obsPlan(root, dir) {
     if (!have && S.deleted && S.deleted[id]) { P.skip.push(`${label}: in basementBOX gelöscht – kommt erst wieder, wenn du sie unter „Gelöschte Übungen“ zurückholst`); continue; }
     if (seen.has(id)) { P.warn.push(`ID ${id} kommt doppelt vor („${seen.get(id)}“ und „${name}“) – zweite Notiz übersprungen`); continue; }
     seen.set(id, name);
+    P.found.add(id);
     if (have && !tick) P.keepNoTick++;
     const secs = obsSections(body);
     const cue = obsCue(secs);
@@ -354,14 +475,27 @@ async function obsPlan(root, dir) {
     if ((have.imgSig || '') !== sig) what.push(sig ? 'Bild' : 'Bild entfernt');
     if (what.length) { x.what = what; P.upd.push(x); }
   }
+  obsWoSort(P.W, P);
   return P;
 }
 function obsPreviewHtml() {
   const P = ui.obs;
   const list = (items) => `<ul class="list-plain">${items.map((x) => `<li>${x}</li>`).join('')}</ul>`;
-  const nothing = !P.add.length && !P.upd.length;
-  let h = modalHead('Übungen aus Obsidian – Vorschau');
-  h += `<p class="small muted">${P.read} Notizen gelesen. In Obsidian wird nichts geändert.</p>`;
+  const W = P.W;
+  const nothing = !P.add.length && !P.upd.length && !W.add.length && !W.upd.length && !W.copy.length;
+  let h = modalHead('Aus Obsidian – Vorschau');
+  h += `<p class="small muted">${P.read} Übungen${W.read ? ` und ${W.read} Workout-Notizen` : ''} gelesen. In Obsidian wird nichts geändert.</p>`;
+  const wLine = (x) => { const d = workoutDuration(Object.assign({}, x.w, { id: x.appId })); return `<b>${esc(x.wid)}</b> ${esc(x.w.name)} <span class="faint">(${exCount(x.w)} Übungen${d ? ', ca. ' + durText(d) : ''})</span>`; };
+  if (W.add.length || W.upd.length || W.copy.length || W.same) {
+    h += '<div class="section-title">Workouts</div>';
+    if (W.add.length) h += `<p class="small"><b>Neu (${W.add.length})</b></p>${list(W.add.map(wLine))}`;
+    if (W.upd.length) h += `<p class="small"><b>Aktualisiert (${W.upd.length})</b> <span class="faint">– in Obsidian geändert, in der App nicht. Deine Musik bleibt.</span></p>${list(W.upd.map(wLine))}`;
+    if (W.copy.length) h += `<p class="small"><b>Als Kopie (${W.copy.length})</b> <span class="faint">– in Obsidian und in der App geändert. Deine App-Fassung bleibt, die Obsidian-Fassung kommt als Kopie dazu.</span></p>${list(W.copy.map(wLine))}`;
+    if (W.same) h += `<p class="small muted">${W.same} Workout(s) unverändert.</p>`;
+  }
+  if (W.warn.length) h += `<div class="section-title">Hinweise zu Workouts (${W.warn.length})</div>${list(W.warn.map(esc))}`;
+  if (W.skip.length) h += `<div class="section-title">Workouts nicht übernommen (${W.skip.length})</div>${list(W.skip.map(esc))}`;
+  if (P.add.length || P.upd.length) h += '<div class="section-title">Übungen</div>';
   if (P.add.length) h += `<div class="section-title">Neu (${P.add.length})</div>${list(P.add.map((a) => `<b>ID ${esc(a.id)}</b> ${esc(a.name)}${a.file ? '' : ' <span class="faint">(ohne Bild)</span>'}`))}`;
   if (P.upd.length) h += `<div class="section-title">Aktualisiert (${P.upd.length})</div>${list(P.upd.map((u) => `<b>ID ${esc(u.id)}</b> ${esc(u.name)}: <span class="faint">${u.what.join(', ')}</span>`))}`;
   if (P.warn.length) h += `<div class="section-title">Hinweise (${P.warn.length})</div>${list(P.warn.map(esc))}`;
@@ -397,10 +531,22 @@ async function obsApply() {
     }
     S.exercises[x.id] = ex;
   }
+  // Workouts
+  const W = P.W;
+  for (const x of W.add) S.workouts.push(obsWoMake(x, null, now));
+  for (const x of W.upd) { const i = S.workouts.indexOf(x.old); const nw = obsWoMake(x, x.old, now); if (i < 0) S.workouts.push(nw); else S.workouts[i] = nw; }
+  for (const x of W.copy) {
+    const c = obsUnlink(obsWoMake(x, x.old, now));
+    c.id = uid(); c.name = `${c.name} (aus Obsidian ${new Date(now).toLocaleDateString('de-DE')})`;
+    c.blocks.forEach((b) => { b.id = uid(); });
+    S.workouts.push(c);
+    x.old.obsSig = x.sig; // diese Obsidian-Fassung ist erledigt, sonst käme bei jedem Holen eine neue Kopie
+  }
   await save();
   await mediaCleanup();
   closeModal(); render();
-  toast(`Übernommen: ${P.add.length} neu, ${P.upd.length} aktualisiert. Danach unter „Daten“ senden.`, { timeout: 7000 });
+  const wn = W.add.length + W.upd.length + W.copy.length;
+  toast(`Übernommen: ${P.add.length} Übung(en) neu, ${P.upd.length} aktualisiert${wn ? `, ${wn} Workout(s)` : ''}. Danach unter „Daten“ senden.`, { timeout: 7000 });
 }
 function exUsedIn(id) { return S.workouts.filter((w) => w.blocks.some((b) => b.items.some((it) => it.t === 'ex' && it.exId === id))); }
 
@@ -589,7 +735,7 @@ function buildSteps(w) {
         const ex = S.exercises[it.exId] || { id: it.exId, name: `Übung ${it.exId} (fehlt)`, cue: '', img: null };
         const work = timed ? Math.max(1, it.work != null && it.work !== '' ? num(it.work) : w.work) : null;
         // Musik: eigenes Stück der Übung, sonst der Musik-Ordner des Abschnitts („dir:Name“)
-        steps.push({ kind: 'work', ex, it, dur: work, sound: it.sound || (b.dirSound ? 'dir:' + b.dirSound : ''), target: String(it.reps || '').trim(), note, noteNew: fresh, block: b, bi, round: r, rounds: R });
+        steps.push({ kind: 'work', ex, it, dur: work, sound: it.sound || (b.dirSound ? 'dir:' + b.dirSound : ''), target: String(it.reps || '').trim(), note: it.note || note, noteNew: fresh || !!it.note, block: b, bi, round: r, rounds: R });
         fresh = false;
         if (timed) {
           const rest = it.rest != null && it.rest !== '' ? num(it.rest) : w.rest;
@@ -1183,7 +1329,7 @@ function viewWorkouts() {
   h += '<div class="grid cols">' + list.map((w) => {
     const d = workoutDuration(w);
     return `<div class="card"><div class="card-row"><div class="grow"><div class="card-title">${esc(w.name || 'Ohne Namen')}</div>
-      <div class="badges"><span class="badge ${w.mode === 'time' ? 'time' : 'tap'}">${w.mode === 'time' ? 'Auf Zeit' : 'Per Tippen'}</span><span class="badge">${exCount(w)} Übungen</span>${d ? `<span class="badge">ca. ${durText(d)}</span>` : ''}</div></div></div>
+      <div class="badges"><span class="badge ${w.mode === 'time' ? 'time' : 'tap'}">${w.mode === 'time' ? 'Auf Zeit' : 'Per Tippen'}</span><span class="badge">${exCount(w)} Übungen</span>${d ? `<span class="badge">ca. ${durText(d)}</span>` : ''}${w.src === 'obsidian' ? '<span class="badge">aus Obsidian</span>' : ''}</div></div></div>
       <div class="btn-row" style="margin-top:12px"><button class="btn" data-a="wo-start" data-id="${w.id}">${ic('play')}Start</button>
       ${pc ? `<button class="btn ghost" data-a="wo-edit" data-id="${w.id}">${ic('edit')}Bearbeiten</button><button class="icon-btn" data-a="wo-copy" data-id="${w.id}" title="Kopieren" aria-label="Kopieren">${ic('copy')}</button><button class="icon-btn" data-a="wo-del" data-id="${w.id}" title="Löschen" aria-label="Löschen">${ic('trash')}</button>` : ''}</div></div>`;
   }).join('') + '</div></div>';
@@ -1193,7 +1339,7 @@ function viewExercises() {
   const q = ui.exQ.trim().toLowerCase(), qi = obsNorm(q);
   const list = Object.values(S.exercises).filter((e) => !q || e.name.toLowerCase().includes(q) || e.id === qi).sort((a, b) => idSort(a.id, b.id));
   let h = `<div class="view-inner"><div class="page-head"><h1>Übungen</h1>${isPC() ? `<button class="btn" data-a="obs-open">${ic('download')}Aus Obsidian holen</button>` : ''}</div>
-    ${isPC() ? '<p class="hint" style="margin:-6px 0 12px">In Obsidian das Häkchen „Übungsauswahl“ setzen, dann hier „Aus Obsidian holen“. Danach unter „Daten“ senden.</p>' : ''}
+    ${isPC() ? '<p class="hint" style="margin:-6px 0 12px">In Obsidian das Häkchen „Übungsauswahl“ setzen, dann hier „Aus Obsidian holen“. Workouts aus dem Ordner „Workouts“ mit dem Häkchen „basementbox“ kommen dabei mit, samt ihren Übungen. Danach unter „Daten“ senden.</p>' : ''}
     <div class="search">${ic('search')}<input type="search" placeholder="ID oder Name" value="${esc(ui.exQ)}" data-in="ex-q"></div><div id="exList">`;
   h += exListHtml(list) + '</div>';
   const del = Object.keys(S.deleted || {}).sort(idSort);
@@ -1307,7 +1453,7 @@ function viewEditor() {
         return;
       }
       const ex = S.exercises[it.exId];
-      h += `<div class="item">${thumb(ex, 'sm')}<div class="it-main"><div class="it-name"><span class="badge id">ID ${esc(it.exId)}</span> ${ex ? esc(ex.name) : '<span style="color:var(--z5)">fehlt in basementBOX</span>'}</div>
+      h += `<div class="item">${thumb(ex, 'sm')}<div class="it-main"><div class="it-name"><span class="badge id">ID ${esc(it.exId)}</span> ${ex ? esc(ex.name) : '<span style="color:var(--z5)">fehlt in basementBOX</span>'}${it.note ? ` <span class="faint">– ${esc(it.note)}</span>` : ''}</div>
         <div class="it-fields">
           ${timed ? `<label>Übung s<input type="number" min="1" value="${it.work ?? ''}" placeholder="${w.work}" data-c="it-num" data-f="work" data-b="${bi}" data-i="${ii}"></label>
           <label>Pause s<input type="number" min="0" value="${it.rest ?? ''}" placeholder="${w.rest}" data-c="it-num" data-f="rest" data-b="${bi}" data-i="${ii}"></label>`
@@ -1382,7 +1528,7 @@ const ACTIONS = {
   'wo-edit': (el) => { const w = S.workouts.find((x) => x.id === el.dataset.id); if (!w) return; ui.ed = JSON.parse(JSON.stringify(w)); render(); $('#view').scrollTop = 0; },
   'wo-copy': async (el) => {
     const w = S.workouts.find((x) => x.id === el.dataset.id); if (!w) return;
-    const c = JSON.parse(JSON.stringify(w)); c.id = uid(); c.name = (w.name || 'Workout') + ' (Kopie)'; c.createdAt = c.updatedAt = Date.now();
+    const c = obsUnlink(JSON.parse(JSON.stringify(w))); c.id = uid(); c.name = (w.name || 'Workout') + ' (Kopie)'; c.createdAt = c.updatedAt = Date.now();
     c.blocks.forEach((b) => { b.id = uid(); });
     S.workouts.push(c); await save(); render();
   },
