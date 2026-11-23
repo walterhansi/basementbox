@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.12.1';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -855,7 +855,7 @@ function wakeOff() { try { if (wakeLock) wakeLock.release(); } catch (e) { /* eg
 
 // Medientasten (Uhr-Musiksteuerung, Bluetooth-Kopfhörer): Nächster/Voriger Titel = Übung vor/zurück, Play/Pause = Pause.
 // Ein stiller Ton läuft während des ganzen Workouts, damit Android die App auch ohne Musik als Player kennt.
-const MM = { el: null };
+const MM = { el: null, on: false };
 function silentWav(sec = 6, rate = 8000) {
   const n = sec * rate, b = new ArrayBuffer(44 + n), v = new DataView(b);
   const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
@@ -867,8 +867,12 @@ function silentWav(sec = 6, rate = 8000) {
 }
 function mmStart() {
   if (!('mediaSession' in navigator)) return;
-  if (!MM.el) { MM.el = new Audio(silentWav()); MM.el.loop = true; }
-  MM.el.play().catch(() => {});
+  if (!MM.el) {
+    MM.el = new Audio(silentWav()); MM.el.loop = true;
+    // Hält Android oder der Browser den stillen Ton an (Anruf, andere App, Display aus), sofort wieder starten
+    MM.el.addEventListener('pause', () => { if (MM.on) setTimeout(mmKeep, 400); });
+  }
+  MM.on = true; mmKeep();
   const ms = navigator.mediaSession, on = (a, f) => { try { ms.setActionHandler(a, f); } catch (e) { /* nicht unterstützt */ } };
   on('nexttrack', () => { if (P && !P.done) playNext(); });
   on('previoustrack', () => { if (P && !P.done) playPrev(); });
@@ -876,6 +880,9 @@ function mmStart() {
   on('play', () => { if (P && !P.done && P.paused) playPause(); });
   on('seekforward', null); on('seekbackward', null);
 }
+function mmKeep() { if (MM.on && MM.el && MM.el.paused) MM.el.play().catch(() => {}); }
+// Alle paar Sekunden nachsehen: stiller Ton läuft noch, Anzeige auf Uhr/Benachrichtigung stimmt
+setInterval(() => { if (MM.on && P && !P.done) { mmKeep(); mmUpdate(); } }, 5000);
 function mmUpdate() {
   if (!P || !('mediaSession' in navigator) || !window.MediaMetadata) return;
   const s = P.steps[P.i]; if (!s) return;
@@ -889,6 +896,7 @@ function mmUpdate() {
   } catch (e) { /* egal */ }
 }
 function mmStop() {
+  MM.on = false;
   if (MM.el) MM.el.pause();
   if (!('mediaSession' in navigator)) return;
   for (const a of ['nexttrack', 'previoustrack', 'pause', 'play']) { try { navigator.mediaSession.setActionHandler(a, null); } catch (e) { /* egal */ } }
@@ -1008,7 +1016,7 @@ function finish() {
   beep(784, 0.2); setTimeout(() => beep(1046, 0.5), 220);
   say('Geschafft. Starke Leistung!');
   P.done = true; P.endedAt = Date.now();
-  renderPlayer(); mmUpdate(); if (MM.el) MM.el.pause();
+  renderPlayer(); mmUpdate(); MM.on = false; if (MM.el) MM.el.pause();
 }
 function playClose() {
   if (P && !P.done && !P.trial && !confirm('Workout beenden?')) return;
@@ -1701,6 +1709,7 @@ document.addEventListener('keydown', (ev) => {
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') { if (P && !P.paused && !P.done) wakeOn(); syncCheck(); }
+  if (P && !P.done) { mmKeep(); mmUpdate(); }
 });
 let resizeT = null;
 window.addEventListener('resize', () => { fitImages(); clearTimeout(resizeT); resizeT = setTimeout(() => { if (P && !P.done) renderPlayer(); }, 150); });
