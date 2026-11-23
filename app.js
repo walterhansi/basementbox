@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -853,6 +853,49 @@ let wakeLock = null;
 async function wakeOn() { try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) { /* egal */ } }
 function wakeOff() { try { if (wakeLock) wakeLock.release(); } catch (e) { /* egal */ } wakeLock = null; }
 
+// Medientasten (Uhr-Musiksteuerung, Bluetooth-Kopfhörer): Nächster/Voriger Titel = Übung vor/zurück, Play/Pause = Pause.
+// Ein stiller Ton läuft während des ganzen Workouts, damit Android die App auch ohne Musik als Player kennt.
+const MM = { el: null };
+function silentWav(sec = 6, rate = 8000) {
+  const n = sec * rate, b = new ArrayBuffer(44 + n), v = new DataView(b);
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate, true);
+  v.setUint16(32, 1, true); v.setUint16(34, 8, true); str(36, 'data'); v.setUint32(40, n, true);
+  new Uint8Array(b, 44).fill(128); // 8 Bit: 128 = Stille
+  return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+}
+function mmStart() {
+  if (!('mediaSession' in navigator)) return;
+  if (!MM.el) { MM.el = new Audio(silentWav()); MM.el.loop = true; }
+  MM.el.play().catch(() => {});
+  const ms = navigator.mediaSession, on = (a, f) => { try { ms.setActionHandler(a, f); } catch (e) { /* nicht unterstützt */ } };
+  on('nexttrack', () => { if (P && !P.done) playNext(); });
+  on('previoustrack', () => { if (P && !P.done) playPrev(); });
+  on('pause', () => { if (P && !P.done) playPause(); });
+  on('play', () => { if (P && !P.done && P.paused) playPause(); });
+  on('seekforward', null); on('seekbackward', null);
+}
+function mmUpdate() {
+  if (!P || !('mediaSession' in navigator) || !window.MediaMetadata) return;
+  const s = P.steps[P.i]; if (!s) return;
+  let title;
+  if (P.done) title = 'Geschafft!';
+  else if (s.kind === 'work') title = s.ex.name + (s.target ? ' · ' + s.target : '');
+  else title = (s.kind === 'rest' ? 'Pause' : 'Gleich') + (s.next ? ' – als Nächstes: ' + s.next.ex.name : '');
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({ title, artist: 'basementBOX', album: P.w.name || 'Workout', artwork: [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }] });
+    navigator.mediaSession.playbackState = P.paused ? 'paused' : 'playing';
+  } catch (e) { /* egal */ }
+}
+function mmStop() {
+  if (MM.el) MM.el.pause();
+  if (!('mediaSession' in navigator)) return;
+  for (const a of ['nexttrack', 'previoustrack', 'pause', 'play']) { try { navigator.mediaSession.setActionHandler(a, null); } catch (e) { /* egal */ } }
+  navigator.mediaSession.metadata = null;
+  navigator.mediaSession.playbackState = 'none';
+}
+
 // P = laufendes Workout
 let P = null;
 const ANN_LABEL = { sig: 'Signaltöne', voice: 'Sprachansage', both: 'Töne + Sprache', none: 'Keine Ansagen' };
@@ -896,7 +939,7 @@ function playStart(w, trial = false) {
   aeInit(); pickVoice();
   AE.radio = {}; // Musik-Ordner beginnen bei jedem Workout mit dem ersten Stück
   P = { w, steps, i: 0, t0: performance.now(), acc: 0, paused: false, sig: ann === 'sig' || ann === 'both', voice: (ann === 'voice' || ann === 'both') && speed === 1, lastBeep: null, startedAt: Date.now(), timer: null, fading: false, trial, speed };
-  wakeOn();
+  wakeOn(); mmStart();
   enterStep(0);
   P.timer = setInterval(tick, 100);
 }
@@ -920,7 +963,7 @@ function enterStep(i) {
     if (s.round > 1 && s.block.items.find((x) => x.t === 'ex') === s.it) t = `Runde ${s.round}. ` + t;
     say(t);
   }
-  renderPlayer();
+  renderPlayer(); mmUpdate();
 }
 function tick() {
   if (!P || P.paused) return;
@@ -956,7 +999,7 @@ function playPause() {
   if (!P) return;
   if (P.paused) { P.paused = false; P.t0 = performance.now(); musicPlay(P.steps[P.i] && P.steps[P.i].sound); wakeOn(); }
   else { P.acc = stepElapsed(); P.paused = true; if (AE.el) { aeRamp(0, 0.2); setTimeout(() => { if (P && P.paused) AE.el.pause(); }, 250); } if (window.speechSynthesis) speechSynthesis.cancel(); }
-  renderPlayer();
+  renderPlayer(); mmUpdate();
 }
 function finish() {
   if (!P) return;
@@ -965,14 +1008,14 @@ function finish() {
   beep(784, 0.2); setTimeout(() => beep(1046, 0.5), 220);
   say('Geschafft. Starke Leistung!');
   P.done = true; P.endedAt = Date.now();
-  renderPlayer();
+  renderPlayer(); mmUpdate(); if (MM.el) MM.el.pause();
 }
 function playClose() {
   if (P && !P.done && !P.trial && !confirm('Workout beenden?')) return;
   if (P) clearInterval(P.timer);
   musicStop(0.3);
   if (window.speechSynthesis) speechSynthesis.cancel();
-  P = null; wakeOff();
+  P = null; wakeOff(); mmStop();
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   $('#player-root').innerHTML = '';
 }
