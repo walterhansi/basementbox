@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.12.2';
+const APP_VERSION = '1.12.3';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -92,8 +92,11 @@ const idbKeys = (s) => idbReq(s, 'readonly', (o) => o.getAllKeys());
 
 function freshData() { return { app: 'basementbox', schema: 1, exercises: {}, sounds: {}, workouts: [], deleted: {}, restored: {}, deletedW: {}, deletedS: {}, imgTrim: 0, updatedAt: 0, dirty: false }; }
 let S = freshData();
+// Früher war der Countdown vor dem Start 10 s, jetzt 5 s. Alte Workouts mit dem
+// alten Standardwert umstellen (nicht, wenn in Obsidian ausdrücklich so eingetragen).
+function prepDefault5(d) { for (const w of d.workouts || []) if (w.prep === 10 && !w.prepSet) w.prep = 5; }
 async function loadData() {
-  try { const d = await idbGet('kv', 'data'); if (d && d.app === 'basementbox') S = Object.assign(freshData(), d); } catch (e) { toast('Gerätespeicher nicht lesbar: ' + e.message, { error: true, timeout: 10000 }); }
+  try { const d = await idbGet('kv', 'data'); if (d && d.app === 'basementbox') { S = Object.assign(freshData(), d); prepDefault5(S); } } catch (e) { toast('Gerätespeicher nicht lesbar: ' + e.message, { error: true, timeout: 10000 }); }
 }
 async function save(changed = true) {
   if (changed) { S.updatedAt = Date.now(); S.dirty = true; }
@@ -331,7 +334,8 @@ function obsWoParse(fm, body, fname) {
     mode: /^tipp/i.test(String(fm.modus || '')) ? 'tap' : 'time',
     work: has(fm.arbeit_s) ? Math.max(1, num(fm.arbeit_s)) : 40,
     rest: has(fm.pause_s) ? Math.max(0, num(fm.pause_s)) : 20,
-    prep: has(fm.vorbereitung_s) ? Math.max(3, num(fm.vorbereitung_s)) : 10,
+    prep: has(fm.vorbereitung_s) ? Math.max(3, num(fm.vorbereitung_s)) : 5,
+    prepSet: has(fm.vorbereitung_s) || undefined,
     restAdvance: /^tipp/i.test(String(fm.nach_pause || '')) ? 'tap' : 'auto',
     blocks: []
   };
@@ -719,7 +723,7 @@ async function previewSound(id) {
 
 /* ================= 5 Workouts ================= */
 function newWorkout() {
-  return { id: uid(), name: '', mode: 'time', work: 40, rest: 20, prep: 10, blocks: [newBlock()], createdAt: Date.now(), updatedAt: Date.now() };
+  return { id: uid(), name: '', mode: 'time', work: 40, rest: 20, prep: 5, blocks: [newBlock()], createdAt: Date.now(), updatedAt: Date.now() };
 }
 function newBlock() { return { id: uid(), title: '', rounds: 1, items: [] }; }
 // Ablauf eines Workouts als Folge von Schritten: Vorbereitung, Übung, Pause …
@@ -749,7 +753,7 @@ function buildSteps(w) {
   const works = steps.filter((s) => s.kind === 'work');
   works.forEach((s, i) => { s.no = i + 1; s.total = works.length; });
   for (let i = steps.length - 1, nxt = null; i >= 0; i--) { if (steps[i].kind === 'work') nxt = steps[i]; else steps[i].next = nxt; }
-  if (works.length) steps.unshift({ kind: 'prep', dur: Math.max(3, num(w.prep) || 10), next: works[0], sound: '' });
+  if (works.length) steps.unshift({ kind: 'prep', dur: Math.max(3, num(w.prep) || 5), next: works[0], sound: '' });
   return steps;
 }
 function workoutDuration(w) {
@@ -1240,6 +1244,7 @@ async function pullMerge(st, sha) {
     const b = await gh(`/repos/${st.R}/git/blobs/${fsha}`);
     await idbPut('media', k, b64ToBlob(b.content, mediaType(k)));
   }
+  prepDefault5(nd);
   S = nd; S.dirty = wasDirty;
   await save(false);
   await mediaCleanup();
@@ -1491,7 +1496,7 @@ function viewEditor() {
       <div class="field"><label for="edRest">Pause (Sekunden)</label><input type="number" min="0" id="edRest" value="${w.rest}" data-c="ed-num" data-f="rest"></div>` : '<div></div><div></div>'}
     </div>
     ${timed ? `<div class="field"><label>Nach der Pause</label><div class="seg"><button class="${w.restAdvance === 'tap' ? '' : 'on'}" data-a="ed-adv" data-m="auto">Automatisch weiter</button><button class="${w.restAdvance === 'tap' ? 'on' : ''}" data-a="ed-adv" data-m="tap">Weiter per Tippen aufs Display</button></div></div>` : ''}
-    <p class="hint">${timed ? 'Die Zeiten gelten für alle Übungen. Bei einzelnen Übungen kannst du sie unten abweichend eintragen. Vor dem Start läuft ein Countdown von ' + (w.prep || 10) + ' Sekunden.' + (w.restAdvance === 'tap' ? ' Nach jeder Pause (und nach dem Countdown) wartet die App, bis du aufs Display tippst.' : '') : 'Nach jeder Übung tippst du auf „Weiter“. Unter „Vorgabe“ kannst du z. B. „12 Wdh“ eintragen – das steht dann groß auf dem Bildschirm.'}</p>`;
+    <p class="hint">${timed ? 'Die Zeiten gelten für alle Übungen. Bei einzelnen Übungen kannst du sie unten abweichend eintragen. Vor dem Start läuft ein Countdown von ' + (w.prep || 5) + ' Sekunden.' + (w.restAdvance === 'tap' ? ' Nach jeder Pause (und nach dem Countdown) wartet die App, bis du aufs Display tippst.' : '') : 'Nach jeder Übung tippst du auf „Weiter“. Unter „Vorgabe“ kannst du z. B. „12 Wdh“ eintragen – das steht dann groß auf dem Bildschirm.'}</p>`;
   w.blocks.forEach((b, bi) => {
     h += `<div class="block"><div class="block-head">
       <input type="text" class="bname" value="${esc(b.title)}" placeholder="Abschnitt ${bi + 1} (Titel optional)" data-in="bl-title" data-b="${bi}">
