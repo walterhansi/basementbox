@@ -7,7 +7,7 @@
 'use strict';
 
 /* ================= 1 Grundlagen ================= */
-const APP_VERSION = '1.12.1';
+const APP_VERSION = '1.12.2';
 const ICONS = {
   play: 'M7 4l13 8-13 8z',
   pause: 'M7 4h4v16H7zM14 4h4v16h-4z',
@@ -97,6 +97,7 @@ async function loadData() {
 }
 async function save(changed = true) {
   if (changed) { S.updatedAt = Date.now(); S.dirty = true; }
+  if ($('#nav')) renderNav(); // Punkt bei „Daten“ gleich aktualisieren
   try { await idbPut('kv', 'data', S); return true; } catch (e) { toast('Speichern fehlgeschlagen: ' + e.message, { error: true, timeout: 10000 }); return false; }
 }
 // Bilder und MP3s: Schlüssel „img_<ID>_<prüfsumme>.jpg“ bzw. „snd_<prüfsumme>.mp3“
@@ -1362,7 +1363,9 @@ const TABS = [
   { id: 'data', label: 'Daten', icon: 'sync' }
 ];
 function renderNav() {
-  $('#nav').innerHTML = TABS.map((t) => `<button class="${ui.tab === t.id ? 'on' : ''}" data-a="tab" data-tab="${t.id}">${ic(t.icon)}<span>${t.label}</span>${t.id === 'data' && ui.news ? '<span class="dot"></span>' : ''}</button>`).join('');
+  // Punkt bei „Daten“: am Handy, wenn es etwas zu holen gibt; am PC auch, wenn etwas zu senden ansteht
+  const dot = ui.news || (isPC() && S.dirty);
+  $('#nav').innerHTML = TABS.map((t) => `<button class="${ui.tab === t.id ? 'on' : ''}" data-a="tab" data-tab="${t.id}">${ic(t.icon)}<span>${t.label}</span>${t.id === 'data' && dot ? `<span class="dot" title="${ui.news ? 'Neuer Stand auf GitHub – bitte holen' : 'Änderungen noch nicht gesendet'}"></span>` : ''}</button>`).join('');
 }
 function render() {
   renderNav();
